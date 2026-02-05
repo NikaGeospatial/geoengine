@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::jobs::{Job, JobRequest, JobStatus};
+use super::jobs::{JobRequest, JobStatus};
 use super::server::AppState;
 use crate::config::project::ProjectConfig;
 use crate::config::settings::Settings;
@@ -336,6 +336,12 @@ pub enum AppError {
     NotFound(String),
     BadRequest(String),
     Internal(String),
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(err: anyhow::Error) -> Self {
+        AppError::Internal(err.to_string())
+    }
 }
 
 impl IntoResponse for AppError {

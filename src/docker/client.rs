@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
 use bollard::container::{Config, CreateContainerOptions, LogsOptions, StartContainerOptions, WaitContainerOptions};
-use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::image::{BuildImageOptions, CreateImageOptions, ImportImageOptions, TagImageOptions};
 use bollard::Docker;
+use bytes::BytesMut;
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
 use crate::cli::run::ContainerConfig;
-use crate::docker::gpu::GpuConfig;
 
 /// Docker client wrapper for GeoEngine operations
 pub struct DockerClient {
@@ -49,7 +49,7 @@ impl DockerClient {
             file,
             tokio_util::codec::BytesCodec::new(),
         )
-        .map(|r| r.map(|b| b.freeze()));
+        .map(|r: Result<BytesMut, io::Error>| r.map(|b| b.freeze()));
 
         let options = ImportImageOptions {
             ..Default::default()

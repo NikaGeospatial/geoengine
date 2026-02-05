@@ -43,4 +43,4 @@ build/
 .pixi/
 pixi.lock
 
-base-image/
+nika-runtime/

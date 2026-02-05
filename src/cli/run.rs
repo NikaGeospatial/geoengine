@@ -97,7 +97,7 @@ impl RunArgs {
                 Some(self.command.clone())
             },
             env_vars,
-            mounts,
+            mounts: mounts.clone(),
             gpu_config,
             memory: self.memory.clone(),
             cpus: self.cpus,
