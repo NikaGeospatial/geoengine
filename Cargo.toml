@@ -1,6 +1,6 @@
 [package]
 name = "geoengine"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["GeoEngine Team"]
 description = "Docker-based isolated runtime manager for geospatial workloads with ArcGIS Pro and QGIS integration"

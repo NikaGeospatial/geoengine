@@ -4,7 +4,7 @@
 class Geoengine < Formula
   desc "Docker-based isolated runtime manager for geospatial workloads"
   homepage "https://github.com/NikaGeospatial/geoengine"
-  version "0.1.0"
+  version "0.1.1"
   license "MIT"
 
   on_macos do

@@ -2,7 +2,7 @@
 name=GeoEngine
 qgisMinimumVersion=3.0
 description=Integrates GeoEngine containerized geoprocessing tools into QGIS
-version=0.1.0
+version=0.1.1
 author=GeoEngine Team
 email=geoengine@example.com
 
