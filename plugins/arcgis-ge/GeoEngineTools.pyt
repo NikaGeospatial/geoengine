@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 GeoEngine Tools - ArcGIS Pro Python Toolbox
-Connects to the GeoEngine proxy service to execute containerized geoprocessing tools.
+Invokes the geoengine CLI directly to execute containerized geoprocessing tools.
 """
 
 import arcpy
 import os
-import json
 import time
 from geoengine_client import GeoEngineClient
 
@@ -17,11 +16,11 @@ class Toolbox:
         self.label = "GeoEngine Tools"
         self.alias = "geoengine"
 
-        # Discover tools from GeoEngine service
+        # Discover tools from GeoEngine CLI
         self.tools = self._discover_tools()
 
     def _discover_tools(self):
-        """Discover available tools from the GeoEngine service."""
+        """Discover available tools from the geoengine CLI."""
         try:
             client = GeoEngineClient()
             projects = client.list_projects()
@@ -36,7 +35,7 @@ class Toolbox:
 
             return tools if tools else [GeoEngineStatusTool]
         except Exception as e:
-            arcpy.AddWarning(f"Could not connect to GeoEngine service: {e}")
+            arcpy.AddWarning(f"Could not discover GeoEngine tools: {e}")
             return [GeoEngineStatusTool]
 
     def _create_tool_class(self, project_name, tool_info):
@@ -113,7 +112,7 @@ class Toolbox:
                 return
 
             def execute(self, parameters, messages):
-                """Execute the tool."""
+                """Execute the tool via geoengine CLI."""
                 try:
                     client = GeoEngineClient()
 
@@ -134,38 +133,22 @@ class Toolbox:
                                 output_path = str(param.value)
                                 output_dir = os.path.dirname(output_path)
 
-                    # Submit job
-                    messages.addMessage(f"Submitting job to GeoEngine...")
-                    job_id = client.submit_job(
+                    messages.addMessage(f"Running tool '{self._tool_name}'...")
+
+                    result = client.run_tool(
                         project=self._project,
                         tool=self._tool_name,
                         inputs=inputs,
-                        output_dir=output_dir
+                        output_dir=output_dir,
+                        on_output=lambda line: messages.addMessage(line),
                     )
 
-                    messages.addMessage(f"Job submitted: {job_id}")
-
-                    # Poll for completion
-                    while True:
-                        status = client.get_job_status(job_id)
-
-                        if status['status'] == 'completed':
-                            messages.addMessage("Job completed successfully!")
-                            break
-                        elif status['status'] == 'failed':
-                            messages.addErrorMessage(f"Job failed: {status.get('error', 'Unknown error')}")
-                            return
-                        elif status['status'] == 'cancelled':
-                            messages.addWarningMessage("Job was cancelled")
-                            return
-
-                        # Update progress
-                        messages.addMessage(f"Status: {status['status']}")
-                        time.sleep(5)
-
-                    # Get outputs
-                    outputs = client.get_job_output(job_id)
-                    messages.addMessage(f"Output files: {outputs}")
+                    messages.addMessage("Tool completed successfully!")
+                    output_files = result.get('files', [])
+                    if output_files:
+                        messages.addMessage(f"Output files: {len(output_files)}")
+                        for f in output_files:
+                            messages.addMessage(f"  {f['name']} ({f.get('size', 0)} bytes)")
 
                 except Exception as e:
                     messages.addErrorMessage(f"Error executing tool: {e}")
@@ -179,23 +162,15 @@ class Toolbox:
 
 
 class GeoEngineStatusTool:
-    """Tool to check GeoEngine service status."""
+    """Tool to check GeoEngine CLI status."""
 
     def __init__(self):
         self.label = "Check GeoEngine Status"
-        self.description = "Check the connection to the GeoEngine proxy service"
+        self.description = "Check that the geoengine CLI binary is available and list registered projects"
         self.canRunInBackground = False
 
     def getParameterInfo(self):
-        port_param = arcpy.Parameter(
-            displayName="Service Port",
-            name="port",
-            datatype="GPLong",
-            parameterType="Optional",
-            direction="Input"
-        )
-        port_param.value = 9876
-        return [port_param]
+        return []
 
     def isLicensed(self):
         return True
@@ -207,28 +182,32 @@ class GeoEngineStatusTool:
         return
 
     def execute(self, parameters, messages):
-        port = parameters[0].value or 9876
-
         try:
-            client = GeoEngineClient(port=port)
-            health = client.health_check()
+            client = GeoEngineClient()
+            info = client.version_check()
 
-            messages.addMessage(f"GeoEngine Service Status: {health['status']}")
-            messages.addMessage(f"Version: {health['version']}")
+            messages.addMessage(f"GeoEngine: {info['version']}")
+            messages.addMessage(f"Status: {info['status']}")
 
             # List projects
             projects = client.list_projects()
             if projects:
                 messages.addMessage(f"\nRegistered Projects ({len(projects)}):")
                 for p in projects:
-                    messages.addMessage(f"  - {p['name']} ({p['tools_count']} tools)")
+                    messages.addMessage(
+                        f"  - {p['name']} ({p.get('tools_count', 0)} tools)"
+                    )
             else:
                 messages.addMessage("\nNo projects registered.")
 
+        except FileNotFoundError as e:
+            messages.addErrorMessage(str(e))
+            messages.addMessage("\nInstall geoengine and ensure it is on your PATH:")
+            messages.addMessage(
+                "  https://github.com/NikaGeospatial/geoengine"
+            )
         except Exception as e:
-            messages.addErrorMessage(f"Cannot connect to GeoEngine service: {e}")
-            messages.addMessage("\nMake sure the service is running:")
-            messages.addMessage("  geoengine service start")
+            messages.addErrorMessage(f"Error: {e}")
 
     def postExecute(self, parameters):
         return

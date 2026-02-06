@@ -341,6 +341,73 @@ impl DockerClient {
         Ok(exit_code)
     }
 
+    /// Run a container attached, routing all container output to host stderr.
+    /// This keeps host stdout free for structured output (e.g. JSON results).
+    pub async fn run_container_attached_to_stderr(&self, config: &ContainerConfig) -> Result<i64> {
+        let container_id = self.create_container(config).await?;
+
+        // Start the container
+        self.docker
+            .start_container(&container_id, None::<StartContainerOptions<String>>)
+            .await?;
+
+        // Stream logs to stderr
+        let log_options = LogsOptions::<String> {
+            follow: true,
+            stdout: true,
+            stderr: true,
+            ..Default::default()
+        };
+
+        let mut log_stream = self.docker.logs(&container_id, Some(log_options));
+
+        while let Some(result) = log_stream.next().await {
+            match result {
+                Ok(output) => {
+                    eprint!("{}", output);
+                }
+                Err(e) => {
+                    tracing::warn!("Log stream error: {}", e);
+                    break;
+                }
+            }
+        }
+
+        // Wait for container to finish
+        let wait_options = WaitContainerOptions {
+            condition: "not-running",
+        };
+
+        let mut wait_stream = self.docker.wait_container(&container_id, Some(wait_options));
+        let exit_code = if let Some(result) = wait_stream.next().await {
+            match result {
+                Ok(response) => response.status_code,
+                Err(e) => {
+                    tracing::warn!("Wait error: {}", e);
+                    -1
+                }
+            }
+        } else {
+            0
+        };
+
+        // Remove container if requested
+        if config.remove_on_exit {
+            self.docker
+                .remove_container(
+                    &container_id,
+                    Some(bollard::container::RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .ok();
+        }
+
+        Ok(exit_code)
+    }
+
     /// Run a container in detached mode
     pub async fn run_container_detached(&self, config: &ContainerConfig) -> Result<String> {
         let container_id = self.create_container(config).await?;

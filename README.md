@@ -6,9 +6,9 @@ Docker-based isolated runtime manager for geospatial workloads with GPU support 
 
 - **Isolated Execution**: Run Python/R scripts in Docker containers with GDAL, PyTorch, and other geospatial libraries
 - **GPU Support**: NVIDIA GPU passthrough for CUDA-accelerated processing
-- **GIS Integration**: Native plugins for ArcGIS Pro and QGIS
+- **GIS Integration**: Native plugins for ArcGIS Pro and QGIS -- tools run directly via the CLI, no proxy service required
 - **Air-gapped Support**: Import/export Docker images for systems without internet access
-- **Project Management**: YAML-based project configuration with named scripts
+- **Project Management**: YAML-based project configuration with named scripts and GIS tool definitions
 - **Cloud Deployment**: Push images to GCP Artifact Registry
 
 ## Quick Start
@@ -66,6 +66,76 @@ geoengine project run my-geospatial-project train
 geoengine project run my-geospatial-project predict -- --input-raster /path/to/image.tif
 ```
 
+### Run GIS Tools from the CLI
+
+GIS tools defined in `geoengine.yaml` can be run directly from the command line. Input parameters are passed as `--input KEY=VALUE` flags, and the CLI automatically maps them to script flags.
+
+```bash
+# List tools available in a project
+geoengine project tools my-project
+
+# Run a GIS tool with input parameters
+geoengine project run-tool my-project classify \
+  --input input_raster=/path/to/image.tif \
+  --input model_name=resnet50 \
+  --output-dir ./results
+
+# Same command with JSON output (used by plugins)
+geoengine project run-tool my-project classify \
+  --input input_raster=/path/to/image.tif \
+  --output-dir ./results \
+  --json
+```
+
+**How input mapping works:**
+
+Each `--input KEY=VALUE` is converted to a script flag `--<flag_name> <value>`:
+- If the tool's input definition has a `map_to` field, that becomes the flag name
+- Otherwise, the input's `name` is used as the flag name
+
+For example, given this tool definition:
+```yaml
+gis:
+  tools:
+    - name: classify
+      script: predict
+      inputs:
+        - name: input_raster
+          type: raster
+          map_to: input-file    # Maps to --input-file
+        - name: model_name
+          type: string          # No map_to, so maps to --model_name
+```
+
+Running:
+```bash
+geoengine project run-tool my-project classify \
+  --input input_raster=/data/image.tif \
+  --input model_name=resnet50
+```
+
+Executes the script as:
+```bash
+python predict.py --input-file /inputs/image.tif --model_name resnet50
+```
+
+File/directory paths are automatically:
+- Mounted read-only into `/inputs/<filename>` (files) or `/mnt/input_N/` (directories)
+- Rewritten in the command line to use the container path
+
+When using `--json`, container logs stream to stderr and a structured JSON result is printed to stdout on completion:
+
+```json
+{
+  "status": "completed",
+  "exit_code": 0,
+  "output_dir": "/absolute/path/to/results",
+  "files": [
+    {"name": "result.tif", "path": "/absolute/path/to/results/result.tif", "size": 12345}
+  ]
+}
+```
+
 ### Run Containers Directly
 
 ```bash
@@ -99,15 +169,29 @@ geoengine image pull nvidia/cuda:12.0-base
 
 ### GIS Integration
 
+The QGIS and ArcGIS plugins invoke the `geoengine` CLI directly -- no proxy service is required. Install the plugins, and any registered project with GIS tools will appear automatically.
+
+```bash
+# Install the ArcGIS Pro plugin
+geoengine service register arcgis
+
+# Install the QGIS plugin
+geoengine service register qgis
+```
+
+The plugins will:
+1. Discover registered projects and their tools via `geoengine project list --json` and `geoengine project tools <name>`
+2. Present tools in the native Processing toolbox / Python Toolbox with typed parameters
+3. Execute tools via `geoengine project run-tool`, streaming real-time container output as progress messages
+4. Support cancellation (QGIS) by terminating the subprocess
+
+#### Legacy Proxy Service
+
+A proxy HTTP service is also available for advanced use cases (remote Docker hosts, shared job queues, web UIs):
+
 ```bash
 # Start the proxy service
 geoengine service start
-
-# Register with ArcGIS Pro
-geoengine service register arcgis
-
-# Register with QGIS
-geoengine service register qgis
 
 # Check service status
 geoengine service status
@@ -128,6 +212,11 @@ geoengine deploy push my-image:latest \
   --region us-central1 \
   --repository geoengine
 ```
+
+### Example Project
+Example projects are available in the [examples](examples) directory. Feel free to try them out by `cd`-ing
+into the projects and register them as local geoengine projects.
+- [Simple Converter]
 
 ## Project Configuration
 
@@ -188,27 +277,27 @@ gis:
 │   (Toolbox)     │     │    (Plugin)     │
 └────────┬────────┘     └────────┬────────┘
          │                       │
-         │   HTTP REST API       │
+         │   subprocess (CLI)    │
          └──────────┬────────────┘
                     │
          ┌──────────▼──────────┐
-         │   GeoEngine Proxy   │
-         │   (localhost:9876)  │
+         │   geoengine CLI     │
+         │  (project run-tool) │
          └──────────┬──────────┘
                     │
-    ┌───────────────┼───────────────┐
-    │               │               │
-┌───▼───┐      ┌───▼───┐       ┌───▼───┐
-│Docker │      │Docker │       │Docker │
-│  #1   │      │  #2   │       │  #3   │
-└───────┘      └───────┘       └───────┘
+                    ▼
+              ┌───────────┐
+              │  Docker   │
+              │ Container │
+              └───────────┘
 ```
 
-The proxy service:
-- Receives job requests from GIS applications
-- Manages a queue of processing jobs
-- Spawns Docker containers for each job
-- Streams results back to the GIS application
+How it works:
+- Plugins discover tools by calling `geoengine project tools <project>` (JSON output)
+- Tool execution invokes `geoengine project run-tool` as a subprocess
+- Container logs stream to stderr in real-time (displayed as progress in the GIS UI)
+- On completion, a JSON result with output file paths is printed to stdout
+- Cancellation terminates the subprocess, which stops and removes the container
 
 ## GPU Support
 
@@ -238,9 +327,26 @@ CUDA is not available on macOS. PyTorch will automatically use the MPS (Metal) b
 
 ## API Reference
 
-### REST API Endpoints
+### CLI Commands
 
-When the proxy service is running:
+| Command | Description |
+|---------|-------------|
+| `geoengine project init` | Create a new `geoengine.yaml` |
+| `geoengine project register <path>` | Register a project directory |
+| `geoengine project list [--json]` | List registered projects |
+| `geoengine project build <project>` | Build the Docker image |
+| `geoengine project run <project> <script>` | Run a named script |
+| `geoengine project tools <project>` | List GIS tools (JSON) |
+| `geoengine project run-tool <project> <tool> --input KEY=VALUE ...` | Run a GIS tool |
+| `geoengine project show <project>` | Show project configuration |
+| `geoengine run <image> [command]` | Run a container directly |
+| `geoengine image list\|pull\|import\|export\|remove` | Manage Docker images |
+| `geoengine service start\|stop\|status\|register` | Manage the legacy proxy service |
+| `geoengine deploy auth\|push\|pull\|list` | GCP Artifact Registry operations |
+
+### REST API Endpoints (Legacy Proxy)
+
+When the proxy service is running (`geoengine service start`):
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
