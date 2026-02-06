@@ -2,20 +2,21 @@
 name=GeoEngine
 qgisMinimumVersion=3.0
 description=Integrates GeoEngine containerized geoprocessing tools into QGIS
-version=0.1.1
+version=0.2.0
 author=GeoEngine Team
 email=geoengine@example.com
 
 about=GeoEngine provides Docker-based isolated runtimes for geospatial workloads
-    with GPU support. This plugin connects QGIS to the GeoEngine proxy service,
+    with GPU support. This plugin connects QGIS to the geoengine CLI,
     allowing you to run containerized Python and R scripts with GDAL, PyTorch,
     and other geospatial libraries directly from the QGIS Processing toolbox.
 
     Features:
     - Run GPU-accelerated geoprocessing tools
-    - Execute long-running jobs without blocking QGIS
+    - Real-time progress streaming from container output
     - Support for custom Python and R scripts
     - Automatic tool discovery from registered projects
+    - No proxy service required (direct CLI invocation)
 
 tracker=https://github.com/NikaGeospatial/geoengine/issues
 repository=https://github.com/NikaGeospatial/geoengine
@@ -31,10 +32,14 @@ experimental=True
 deprecated=False
 
 changelog=
+    0.2.0 - Direct CLI integration
+        - Removed dependency on proxy service for tool execution
+        - Tools now invoke geoengine CLI directly via subprocess
+        - Real-time progress streaming from container output
+        - Improved cancellation support
+    0.1.1 - Use real github org name
     0.1.0 - Initial release
         - Processing provider integration
         - Dynamic tool discovery
         - Job submission and monitoring
         - Support for raster and vector inputs/outputs
-    0.1.1 - Use real github org name
-    

@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 GeoEngine QGIS Processing Provider
-Provides GeoEngine tools as QGIS Processing algorithms.
+Invokes the geoengine CLI directly to provide containerized geoprocessing tools
+as QGIS Processing algorithms.
 """
 
 import json
-import time
-import urllib.request
-import urllib.error
-from typing import Any, Dict, List, Optional
+import os
+import shutil
+import subprocess
+from typing import Any, Callable, Dict, List, Optional
 
 from qgis.core import (
     QgsProcessingAlgorithm,
@@ -23,6 +24,7 @@ from qgis.core import (
     QgsProcessingParameterFolderDestination,
     QgsProcessingParameterRasterDestination,
     QgsProcessingParameterVectorDestination,
+    QgsProcessingParameterEnum,
     QgsProcessingProvider,
     QgsProcessingOutputRasterLayer,
     QgsProcessingOutputVectorLayer,
@@ -30,60 +32,134 @@ from qgis.core import (
 )
 
 
-class GeoEngineClient:
-    """Simple HTTP client for GeoEngine service."""
+# ---------------------------------------------------------------------------
+# CLI Client
+# ---------------------------------------------------------------------------
 
-    def __init__(self, host: str = "localhost", port: int = 9876):
-        self.base_url = f"http://{host}:{port}"
+class GeoEngineCLIClient:
+    """Client that invokes the geoengine CLI binary via subprocess."""
 
-    def _request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Any:
-        url = f"{self.base_url}{endpoint}"
+    def __init__(self):
+        self.binary = self._find_binary()
 
-        if data is not None:
-            data_bytes = json.dumps(data).encode('utf-8')
-            req = urllib.request.Request(
-                url, data=data_bytes, method=method,
-                headers={'Content-Type': 'application/json'}
-            )
-        else:
-            req = urllib.request.Request(url, method=method)
+    @staticmethod
+    def _find_binary() -> str:
+        """Locate the geoengine binary."""
+        if "/usr/local/bin" not in os.environ["PATH"]:
+            os.environ["PATH"] += ":/usr/local/bin"
+        path = shutil.which('geoengine')
+        if path:
+            return path
 
-        try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                return json.loads(response.read().decode('utf-8'))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8')
-            try:
-                error_json = json.loads(error_body)
-                raise Exception(error_json.get('error', str(e)))
-            except json.JSONDecodeError:
-                raise Exception(f"HTTP {e.code}: {error_body}")
-        except urllib.error.URLError as e:
-            raise Exception(f"Cannot connect to GeoEngine: {e.reason}")
+        home = os.path.expanduser('~')
+        for candidate in [
+            os.path.join(home, '.geoengine', 'bin', 'geoengine'),
+            os.path.join(home, '.cargo', 'bin', 'geoengine')
+        ]:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
 
-    def health_check(self) -> Dict:
-        return self._request('GET', '/api/health')
+        raise FileNotFoundError(
+            "geoengine binary not found. "
+            "Install it from https://github.com/NikaGeospatial/geoengine "
+            "or ensure it is on your PATH."
+        )
+
+    def version_check(self) -> Dict:
+        result = subprocess.run(
+            [self.binary, '--version'],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            raise Exception(f"geoengine version check failed: {result.stderr.strip()}")
+        return {'status': 'healthy', 'version': result.stdout.strip()}
 
     def list_projects(self) -> List[Dict]:
-        return self._request('GET', '/api/projects')
+        result = subprocess.run(
+            [self.binary, 'project', 'list', '--json'],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            raise Exception(f"Failed to list projects: {result.stderr.strip()}")
+        return json.loads(result.stdout)
 
     def get_project_tools(self, name: str) -> List[Dict]:
-        return self._request('GET', f'/api/projects/{name}/tools')
+        result = subprocess.run(
+            [self.binary, 'project', 'tools', name],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            raise Exception(f"Failed to get tools for '{name}': {result.stderr.strip()}")
+        return json.loads(result.stdout)
 
-    def submit_job(self, project: str, tool: str, inputs: Dict, output_dir: Optional[str] = None) -> str:
-        data = {'project': project, 'tool': tool, 'inputs': inputs}
+    def run_tool(
+        self,
+        project: str,
+        tool: str,
+        inputs: Dict[str, Any],
+        output_dir: Optional[str] = None,
+        on_output: Optional[Callable[[str], None]] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> Dict:
+        """Run a tool synchronously, streaming container output via on_output.
+
+        Input parameters are passed as --input KEY=VALUE flags.
+        The CLI maps these to script flags using the tool's input definitions
+        (using map_to if specified, otherwise the input name).
+        File paths are auto-mounted into the container.
+        """
+        cmd = [self.binary, 'project', 'run-tool', project, tool, '--json']
         if output_dir:
-            data['output_dir'] = output_dir
-        response = self._request('POST', '/api/jobs', data)
-        return response['id']
+            cmd.extend(['--output-dir', output_dir])
 
-    def get_job_status(self, job_id: str) -> Dict:
-        return self._request('GET', f'/api/jobs/{job_id}')
+        # Add input parameters as --input KEY=VALUE
+        for key, value in inputs.items():
+            if value is not None:
+                cmd.extend(['--input', f'{key}={value}'])
 
-    def get_job_output(self, job_id: str) -> List[Dict]:
-        response = self._request('GET', f'/api/jobs/{job_id}/output')
-        return response.get('files', [])
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
 
+        try:
+            for line in iter(process.stderr.readline, ''):
+                if line:
+                    stripped = line.rstrip('\n')
+                    if on_output and stripped:
+                        on_output(stripped)
+                if is_cancelled and is_cancelled():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    raise Exception("Job cancelled by user")
+
+            process.wait()
+
+            stdout_data = process.stdout.read()
+            if process.returncode == 0 and stdout_data.strip():
+                return json.loads(stdout_data)
+            elif process.returncode != 0:
+                if stdout_data.strip():
+                    try:
+                        return json.loads(stdout_data)
+                    except json.JSONDecodeError:
+                        pass
+                raise Exception(f"Tool exited with code {process.returncode}")
+            else:
+                return {'status': 'completed', 'exit_code': 0, 'files': []}
+        finally:
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
+
+
+# ---------------------------------------------------------------------------
+# QGIS Processing Provider
+# ---------------------------------------------------------------------------
 
 class GeoEngineProvider(QgsProcessingProvider):
     """QGIS Processing provider for GeoEngine tools."""
@@ -119,11 +195,11 @@ class GeoEngineProvider(QgsProcessingProvider):
             self.addAlgorithm(alg)
 
     def _discover_algorithms(self) -> List[QgsProcessingAlgorithm]:
-        """Discover algorithms from GeoEngine service."""
+        """Discover algorithms from geoengine CLI."""
         algorithms = []
 
         try:
-            client = GeoEngineClient()
+            client = GeoEngineCLIClient()
             projects = client.list_projects()
 
             for project in projects:
@@ -132,11 +208,16 @@ class GeoEngineProvider(QgsProcessingProvider):
                     alg = GeoEngineAlgorithm(project['name'], tool)
                     algorithms.append(alg)
 
-        except Exception as e:
-            # Service not available, return empty list
+        except Exception:
+            # Binary not found or other error, return empty list
             pass
 
         return algorithms
+
+
+# ---------------------------------------------------------------------------
+# QGIS Processing Algorithm
+# ---------------------------------------------------------------------------
 
 
 class GeoEngineAlgorithm(QgsProcessingAlgorithm):
@@ -197,6 +278,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         label = param_info.get('label', name)
         required = param_info.get('required', True)
         default = param_info.get('default')
+        options = param_info.get('choices', [])
 
         if is_output:
             if param_type == 'raster':
@@ -213,7 +295,10 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         elif param_type == 'vector':
             param = QgsProcessingParameterVectorLayer(name, label, optional=not required)
         elif param_type == 'string':
-            param = QgsProcessingParameterString(name, label, defaultValue=default, optional=not required)
+            if len(options) > 0:
+                param = QgsProcessingParameterEnum(name, label, options, defaultValue=default, optional=not required, usesStaticStrings=True)
+            else:
+                param = QgsProcessingParameterString(name, label, defaultValue=default, optional=not required)
         elif param_type == 'int':
             param = QgsProcessingParameterNumber(
                 name, label, type=QgsProcessingParameterNumber.Integer,
@@ -243,8 +328,8 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         context: QgsProcessingContext,
         feedback: QgsProcessingFeedback
     ) -> Dict:
-        """Execute the algorithm."""
-        client = GeoEngineClient()
+        """Execute the algorithm via geoengine CLI."""
+        client = GeoEngineCLIClient()
 
         # Build inputs
         inputs = {}
@@ -264,50 +349,26 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         # Get output directory
         output_dir = self.parameterAsString(parameters, 'OUTPUT_DIR', context)
 
-        feedback.pushInfo(f"Submitting job to GeoEngine...")
-        feedback.pushInfo(f"Project: {self._project}")
-        feedback.pushInfo(f"Tool: {self._tool_name}")
+        feedback.pushInfo(f"Running tool '{self._tool_name}' for project '{self._project}'...")
 
-        # Submit job
-        job_id = client.submit_job(
+        # Run the tool synchronously, streaming container output
+        result = client.run_tool(
             project=self._project,
             tool=self._tool_name,
             inputs=inputs,
-            output_dir=output_dir
+            output_dir=output_dir,
+            on_output=lambda line: feedback.pushInfo(line),
+            is_cancelled=lambda: feedback.isCanceled(),
         )
 
-        feedback.pushInfo(f"Job submitted: {job_id}")
-
-        # Poll for completion
-        while True:
-            if feedback.isCanceled():
-                feedback.pushInfo("Cancelling job...")
-                # TODO: Cancel job via API
-                return {}
-
-            status = client.get_job_status(job_id)
-            current_status = status['status']
-
-            feedback.pushInfo(f"Status: {current_status}")
-
-            if current_status == 'completed':
-                feedback.pushInfo("Job completed successfully!")
-                break
-            elif current_status == 'failed':
-                raise Exception(f"Job failed: {status.get('error', 'Unknown error')}")
-            elif current_status == 'cancelled':
-                raise Exception("Job was cancelled")
-
-            # Update progress (estimate based on time)
-            feedback.setProgress(50)
-            time.sleep(5)
-
-        # Get outputs
-        output_files = client.get_job_output(job_id)
-        feedback.pushInfo(f"Output files: {len(output_files)}")
+        feedback.pushInfo("Tool completed successfully!")
+        feedback.setProgress(100)
 
         # Build result dictionary
         results = {'OUTPUT_DIR': output_dir}
+
+        output_files = result.get('files', [])
+        feedback.pushInfo(f"Output files: {len(output_files)}")
 
         for out in self._outputs:
             name = out['name']

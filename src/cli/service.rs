@@ -444,26 +444,26 @@ fn find_qgis_plugin_dir() -> Result<PathBuf> {
 
 fn write_arcgis_plugin(dir: &PathBuf) -> Result<()> {
     // Write the Python toolbox
-    let toolbox_content = include_str!("../../plugins/arcgis/GeoEngineTools.pyt");
+    let toolbox_content = include_str!("../../plugins/arcgis-ge/GeoEngineTools.pyt");
     std::fs::write(dir.join("GeoEngineTools.pyt"), toolbox_content)?;
 
-    let client_content = include_str!("../../plugins/arcgis/geoengine_client.py");
+    let client_content = include_str!("../../plugins/arcgis-ge/geoengine_client.py");
     std::fs::write(dir.join("geoengine_client.py"), client_content)?;
 
     Ok(())
 }
 
 fn write_qgis_plugin(dir: &PathBuf) -> Result<()> {
-    let init_content = include_str!("../../plugins/qgis/__init__.py");
+    let init_content = include_str!("../../plugins/qgis-ge/__init__.py");
     std::fs::write(dir.join("__init__.py"), init_content)?;
 
-    let plugin_content = include_str!("../../plugins/qgis/geoengine_plugin.py");
+    let plugin_content = include_str!("../../plugins/qgis-ge/geoengine_plugin.py");
     std::fs::write(dir.join("geoengine_plugin.py"), plugin_content)?;
 
-    let provider_content = include_str!("../../plugins/qgis/geoengine_provider.py");
+    let provider_content = include_str!("../../plugins/qgis-ge/geoengine_provider.py");
     std::fs::write(dir.join("geoengine_provider.py"), provider_content)?;
 
-    let metadata_content = include_str!("../../plugins/qgis/metadata.txt");
+    let metadata_content = include_str!("../../plugins/qgis-ge/metadata.txt");
     std::fs::write(dir.join("metadata.txt"), metadata_content)?;
 
     Ok(())

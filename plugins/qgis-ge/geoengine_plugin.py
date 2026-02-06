@@ -8,7 +8,7 @@ from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.PyQt.QtGui import QIcon
 import os
 
-from .geoengine_provider import GeoEngineProvider
+from .geoengine_provider import GeoEngineProvider, GeoEngineCLIClient
 
 
 class GeoEnginePlugin:
@@ -87,19 +87,18 @@ class GeoEnginePlugin:
             QgsApplication.processingRegistry().removeProvider(self.provider)
 
     def show_status(self):
-        """Show GeoEngine service status."""
+        """Show GeoEngine CLI status."""
         try:
-            from .geoengine_provider import GeoEngineClient
-            client = GeoEngineClient()
-            health = client.health_check()
+            client = GeoEngineCLIClient()
+            info = client.version_check()
             projects = client.list_projects()
 
-            msg = f"GeoEngine Service Status: {health['status']}\n"
-            msg += f"Version: {health['version']}\n\n"
+            msg = f"GeoEngine: {info['version']}\n"
+            msg += f"Status: {info['status']}\n\n"
             msg += f"Registered Projects: {len(projects)}\n"
 
             for p in projects:
-                msg += f"  - {p['name']} ({p['tools_count']} tools)\n"
+                msg += f"  - {p['name']} ({p.get('tools_count', 0)} tools)\n"
 
             QMessageBox.information(
                 self.iface.mainWindow(),
@@ -107,13 +106,19 @@ class GeoEnginePlugin:
                 msg
             )
 
+        except FileNotFoundError as e:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "GeoEngine Error",
+                f"{e}\n\n"
+                "Install geoengine and ensure it is on your PATH:\n"
+                "  https://github.com/NikaGeospatial/geoengine"
+            )
         except Exception as e:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "GeoEngine Error",
-                f"Cannot connect to GeoEngine service:\n{e}\n\n"
-                "Make sure the service is running:\n"
-                "  geoengine service start"
+                f"Error communicating with geoengine:\n{e}"
             )
 
     def refresh_tools(self):

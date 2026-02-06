@@ -115,6 +115,9 @@ pub struct ToolParameter {
     /// Display label
     pub label: Option<String>,
 
+    /// Optional explicit mapping to script's input parameter. Otherwise, parameter name is used.
+    pub map_to: Option<String>,
+
     /// Parameter type: raster, vector, string, int, float, bool
     #[serde(rename = "type")]
     pub param_type: String,
@@ -211,6 +214,7 @@ impl ProjectConfig {
                         ToolParameter {
                             name: "input_raster".to_string(),
                             label: Some("Input Raster".to_string()),
+                            map_to: None,
                             param_type: "raster".to_string(),
                             default: None,
                             required: Some(true),
@@ -222,6 +226,7 @@ impl ProjectConfig {
                         ToolParameter {
                             name: "output_raster".to_string(),
                             label: Some("Output Raster".to_string()),
+                            map_to: None,
                             param_type: "raster".to_string(),
                             default: None,
                             required: Some(true),
