@@ -216,7 +216,8 @@ geoengine deploy push my-image:latest \
 ### Example Project
 Example projects are available in the [examples](examples) directory. Feel free to try them out by `cd`-ing
 into the projects and register them as local geoengine projects.
-- [Simple Converter]
+- [Simple Converter](examples/converter) - Takes input directory, converts files in it to specified format,
+  spits it out into output directory.
 
 ## Project Configuration
 
