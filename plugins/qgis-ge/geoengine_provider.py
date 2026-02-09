@@ -219,7 +219,7 @@ class GeoEngineProvider(QgsProcessingProvider):
 
 
         except Exception as e:
-            print("GeoEngine tool discovery failed: %s", e)
+            print(f"GeoEngine tool discovery failed: {e}")
             # Binary not found or other error, return empty list
             pass
 
