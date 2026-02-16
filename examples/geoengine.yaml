@@ -1,173 +1,59 @@
-# GeoEngine Project Configuration
-# Documentation: https://github.com/NikaGeospatial/geoengine
-
 name: land-cover-classifier
 version: "1.0"
+description: "Deep learning-based land cover classification from satellite imagery"
 
-# Base image (optional - can use Dockerfile instead)
-# Use the public nika-runtime image from Docker Hub
-base_image: lawrencenika/nika-runtime:latest
+command:
+  program: python3
+  script: main.py
+  inputs:
+    - name: input_file
+      type: file
+      required: true
+      description: "Input satellite image to classify"
 
-# Build configuration
-build:
-  dockerfile: ./Dockerfile
-  context: .
-  args:
-    PYTHON_VERSION: "3.11"
-    GDAL_VERSION: "3.8.0"
-    PYTORCH_VERSION: "2.1.0"
+    - name: output_folder
+      type: folder
+      required: true
+      description: "Output folder for classification results"
 
-# Runtime configuration
-runtime:
-  # Enable GPU passthrough (requires NVIDIA Container Toolkit)
-  gpu: true
+    - name: model
+      type: enum
+      required: false
+      default: "resnet50"
+      description: "Classification model to use"
+      enum_values:
+        - resnet50
+        - efficientnet
+        - unet
 
-  # Resource limits
-  memory: "16g"
-  cpus: 4
-  shm_size: "2g"  # Shared memory for PyTorch DataLoader workers
+    - name: confidence
+      type: number
+      required: false
+      default: 0.75
+      description: "Minimum confidence threshold"
 
-  # Volume mounts (relative paths are relative to project directory)
-  mounts:
-    - host: ./data
-      container: /data
-      readonly: false
-    - host: ./models
-      container: /models
-      readonly: true
-    - host: ./output
-      container: /output
+    - name: verbose
+      type: boolean
+      required: false
+      default: false
+      description: "Enable verbose output"
 
-  # Environment variables
-  environment:
-    CUDA_VISIBLE_DEVICES: "0"
-    GDAL_DATA: /usr/share/gdal
-    PROJ_LIB: /usr/share/proj
-    PYTHONUNBUFFERED: "1"
-    OMP_NUM_THREADS: "4"
+    - name: timestamp
+      type: datetime
+      required: false
+      description: "Acquisition date of the input imagery"
 
-  # Working directory inside container
-  workdir: /workspace
+local_dir_mounts:
+  - host_path: ./data
+    container_path: /data
+    readonly: false
+  - host_path: ./models
+    container_path: /models
+    readonly: true
 
-# Named scripts that can be run with 'geoengine project run <name> <script>'
-scripts:
-  default: python main.py
-  train: python train.py --epochs 100 --batch-size 32
-  predict: python predict.py
-  preprocess: python preprocess.py --normalize
-  evaluate: python evaluate.py --metrics all
-  process_r: Rscript process.R
+plugins:
+  arcgis: false
+  qgis: true
 
-# GIS integration - tools exposed to ArcGIS Pro and QGIS
-gis:
-  tools:
-    # Land cover classification tool
-    - name: classify_land_cover
-      label: "Land Cover Classification"
-      description: "Deep learning-based land cover classification using satellite imagery"
-      script: predict
-
-      inputs:
-        - name: input_raster
-          type: raster
-          label: "Input Satellite Image"
-          description: "Multi-band satellite image (e.g., Sentinel-2, Landsat)"
-          required: true
-
-        - name: model_name
-          type: string
-          label: "Model"
-          description: "Classification model to use"
-          default: "resnet50"
-          choices:
-            - "resnet50"
-            - "efficientnet"
-            - "unet"
-
-        - name: confidence_threshold
-          type: float
-          label: "Confidence Threshold"
-          description: "Minimum confidence for classification (0-1)"
-          default: 0.5
-          required: false
-
-      outputs:
-        - name: output_raster
-          type: raster
-          label: "Classification Result"
-          description: "Classified land cover raster"
-
-        - name: confidence_raster
-          type: raster
-          label: "Confidence Map"
-          description: "Per-pixel confidence values"
-
-    # Change detection tool
-    - name: detect_changes
-      label: "Change Detection"
-      description: "Detect changes between two time periods"
-      script: default
-
-      inputs:
-        - name: image_before
-          type: raster
-          label: "Before Image"
-          required: true
-
-        - name: image_after
-          type: raster
-          label: "After Image"
-          required: true
-
-        - name: change_threshold
-          type: float
-          label: "Change Threshold"
-          default: 0.3
-
-      outputs:
-        - name: change_mask
-          type: raster
-          label: "Change Mask"
-
-        - name: change_vector
-          type: vector
-          label: "Change Polygons"
-
-    # Object detection tool
-    - name: detect_objects
-      label: "Object Detection"
-      description: "Detect objects in aerial/satellite imagery"
-      script: default
-
-      inputs:
-        - name: input_image
-          type: raster
-          label: "Input Image"
-          required: true
-
-        - name: object_class
-          type: string
-          label: "Object Class"
-          default: "building"
-          choices:
-            - "building"
-            - "vehicle"
-            - "tree"
-            - "road"
-
-        - name: min_confidence
-          type: float
-          label: "Minimum Confidence"
-          default: 0.7
-
-      outputs:
-        - name: detections
-          type: vector
-          label: "Detected Objects"
-          description: "Vector layer with detected object bounding boxes"
-
-# Deployment configuration for GCP Artifact Registry
 deploy:
-  gcp_project: my-gcp-project
-  region: us-central1
-  repository: geoengine-images
+  tenant_id: null

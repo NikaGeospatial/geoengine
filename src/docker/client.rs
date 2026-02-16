@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
-use crate::cli::run::ContainerConfig;
+use super::config::ContainerConfig;
 
 /// Docker client wrapper for GeoEngine operations
 pub struct DockerClient {
@@ -15,6 +15,7 @@ pub struct DockerClient {
 }
 
 /// Information about a Docker image
+#[derive(Clone)]
 pub struct ImageInfo {
     pub id: String,
     pub repo_tags: Vec<String>,
@@ -75,7 +76,7 @@ impl DockerClient {
         Ok(image_id)
     }
 
-    /// List Docker images
+    /// List Docker images under geoengine
     pub async fn list_images(&self, filter: Option<&str>, all: bool) -> Result<Vec<ImageInfo>> {
         let options = bollard::image::ListImagesOptions::<String> {
             all,
@@ -86,6 +87,9 @@ impl DockerClient {
 
         let mut result: Vec<ImageInfo> = images
             .into_iter()
+            .filter(|img| {
+               img.repo_tags.iter().any(|t| t.starts_with("geoengine-local"))
+            })
             .filter(|img| {
                 if let Some(f) = filter {
                     img.repo_tags
@@ -221,11 +225,11 @@ impl DockerClient {
         no_cache: bool,
     ) -> Result<()> {
         // Create tar archive of context
-        let tar_path = std::env::temp_dir().join(format!("geoengine-build-{}.tar", uuid::Uuid::new_v4()));
+        let tar_path = std::env::temp_dir().join(format!("geoengine-build-{}-{}.tar", std::process::id(), chrono::Utc::now().timestamp()));
 
         // Use tar command to create archive
         let status = std::process::Command::new("tar")
-            .args(["-cf", tar_path.to_str().unwrap(), "-C", context.to_str().unwrap(), "."])
+            .args(["--no-xattrs", "-cf", tar_path.to_str().unwrap(), "-C", context.to_str().unwrap(), "."])
             .status()
             .context("Failed to create build context tar")?;
 
@@ -283,6 +287,13 @@ impl DockerClient {
         self.docker
             .start_container(&container_id, None::<StartContainerOptions<String>>)
             .await?;
+        
+        let command_display = config
+            .command
+            .as_ref()
+            .map(|cmd| cmd.join(" "))
+            .unwrap_or_else(|| "<none>".to_string());
+        println!("Container command: {}", command_display);
 
         // Stream logs
         let log_options = LogsOptions::<String> {
@@ -298,6 +309,73 @@ impl DockerClient {
             match result {
                 Ok(output) => {
                     print!("{}", output);
+                }
+                Err(e) => {
+                    tracing::warn!("Log stream error: {}", e);
+                    break;
+                }
+            }
+        }
+
+        // Wait for container to finish
+        let wait_options = WaitContainerOptions {
+            condition: "not-running",
+        };
+
+        let mut wait_stream = self.docker.wait_container(&container_id, Some(wait_options));
+        let exit_code = if let Some(result) = wait_stream.next().await {
+            match result {
+                Ok(response) => response.status_code,
+                Err(e) => {
+                    tracing::warn!("Wait error: {}", e);
+                    -1
+                }
+            }
+        } else {
+            0
+        };
+
+        // Remove container if requested
+        if config.remove_on_exit {
+            self.docker
+                .remove_container(
+                    &container_id,
+                    Some(bollard::container::RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .ok();
+        }
+
+        Ok(exit_code)
+    }
+
+    /// Run a container attached, routing all container output to host stderr.
+    /// This keeps host stdout free for structured output (e.g. JSON results).
+    pub async fn run_container_attached_to_stderr(&self, config: &ContainerConfig) -> Result<i64> {
+        let container_id = self.create_container(config).await?;
+
+        // Start the container
+        self.docker
+            .start_container(&container_id, None::<StartContainerOptions<String>>)
+            .await?;
+
+        // Stream logs to stderr
+        let log_options = LogsOptions::<String> {
+            follow: true,
+            stdout: true,
+            stderr: true,
+            ..Default::default()
+        };
+
+        let mut log_stream = self.docker.logs(&container_id, Some(log_options));
+
+        while let Some(result) = log_stream.next().await {
+            match result {
+                Ok(output) => {
+                    eprint!("{}", output);
                 }
                 Err(e) => {
                     tracing::warn!("Log stream error: {}", e);
@@ -380,33 +458,21 @@ impl DockerClient {
             ..Default::default()
         };
 
-        // Memory limit
-        if let Some(memory) = &config.memory {
-            host_config.memory = Some(parse_memory_limit(memory)?);
-        }
+        // GPU configuration — only set up Docker device requests for NVIDIA GPUs.
+        // Metal (macOS) does not require Docker-level GPU passthrough.
+        if let Some(gpu_config) = &config.gpu_config {
+            if gpu_config.is_nvidia() {
+                host_config.device_requests = Some(vec![bollard::models::DeviceRequest {
+                    driver: Some("nvidia".to_string()),
+                    count: Some(-1), // All available GPUs
+                    capabilities: Some(vec![vec!["gpu".to_string()]]),
+                    ..Default::default()
+                }]);
 
-        // CPU limit
-        if let Some(cpus) = config.cpus {
-            host_config.nano_cpus = Some((cpus * 1_000_000_000.0) as i64);
-        }
-
-        // Shared memory size
-        if let Some(shm_size) = &config.shm_size {
-            host_config.shm_size = Some(parse_memory_limit(shm_size)?);
-        }
-
-        // GPU configuration
-        if let Some(_gpu_config) = &config.gpu_config {
-            host_config.device_requests = Some(vec![bollard::models::DeviceRequest {
-                driver: Some("nvidia".to_string()),
-                count: Some(-1), // All GPUs
-                capabilities: Some(vec![vec!["gpu".to_string()]]),
-                ..Default::default()
-            }]);
-
-            // Add NVIDIA env vars
-            env.push("NVIDIA_VISIBLE_DEVICES=all".to_string());
-            env.push("NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string());
+                // Add NVIDIA env vars
+                env.push("NVIDIA_VISIBLE_DEVICES=all".to_string());
+                env.push("NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string());
+            }
         }
 
         let container_config = Config {
@@ -452,30 +518,4 @@ impl DockerClient {
         self.docker.remove_container(container_id, Some(options)).await?;
         Ok(())
     }
-}
-
-/// Parse memory limit string (e.g., "8g", "512m") to bytes
-fn parse_memory_limit(limit: &str) -> Result<i64> {
-    let limit = limit.to_lowercase();
-    let (num_str, multiplier) = if limit.ends_with("g") {
-        (&limit[..limit.len() - 1], 1024 * 1024 * 1024)
-    } else if limit.ends_with("gb") {
-        (&limit[..limit.len() - 2], 1024 * 1024 * 1024)
-    } else if limit.ends_with("m") {
-        (&limit[..limit.len() - 1], 1024 * 1024)
-    } else if limit.ends_with("mb") {
-        (&limit[..limit.len() - 2], 1024 * 1024)
-    } else if limit.ends_with("k") {
-        (&limit[..limit.len() - 1], 1024)
-    } else if limit.ends_with("kb") {
-        (&limit[..limit.len() - 2], 1024)
-    } else {
-        (limit.as_str(), 1)
-    };
-
-    let num: i64 = num_str
-        .parse()
-        .with_context(|| format!("Invalid memory limit: {}", limit))?;
-
-    Ok(num * multiplier)
 }

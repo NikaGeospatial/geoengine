@@ -8,9 +8,9 @@ use crate::utils::paths;
 /// Global GeoEngine settings stored in ~/.geoengine/settings.yaml
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
-    /// Registered projects (name -> path)
-    #[serde(default)]
-    pub projects: HashMap<String, PathBuf>,
+    /// Registered workers (name -> path)
+    #[serde(default, alias = "projects")]
+    pub workers: HashMap<String, PathBuf>,
 
     /// Default GCP project ID
     pub gcp_project: Option<String>,
@@ -18,11 +18,6 @@ pub struct Settings {
     /// Default GCP region
     pub gcp_region: Option<String>,
 
-    /// Service port (when running)
-    pub service_port: Option<u16>,
-
-    /// Maximum concurrent containers for proxy service
-    pub max_workers: Option<usize>,
 }
 
 impl Settings {
@@ -60,35 +55,37 @@ impl Settings {
         Ok(())
     }
 
-    /// Register a new project
-    pub fn register_project(&mut self, name: &str, path: &PathBuf) -> Result<()> {
-        // Check if name already exists with different path
-        if let Some(existing) = self.projects.get(name) {
-            if existing != path {
-                anyhow::bail!(
-                    "Project '{}' already registered at {}. Unregister it first.",
-                    name,
-                    existing.display()
-                );
+    /// Register a new worker
+    pub fn register_worker(&mut self, name: &str, path: &PathBuf) -> Result<()> {
+        self.workers.insert(name.to_string(), path.clone());
+        Ok(())
+    }
+
+    /// Find a worker whose registered path matches the given directory.
+    /// Returns (name, path) if found.
+    pub fn find_worker_by_path(&self, dir: &std::path::Path) -> Option<(String, PathBuf)> {
+        let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        for (name, path) in &self.workers {
+            let registered = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if registered == canonical {
+                return Some((name.clone(), registered));
             }
         }
-
-        self.projects.insert(name.to_string(), path.clone());
-        Ok(())
+        None
     }
 
-    /// Unregister a project
-    pub fn unregister_project(&mut self, name: &str) -> Result<()> {
-        if self.projects.remove(name).is_none() {
-            anyhow::bail!("Project '{}' is not registered", name);
+    /// Unregister a worker
+    pub fn unregister_worker(&mut self, name: &str) -> Result<()> {
+        if self.workers.remove(name).is_none() {
+            anyhow::bail!("Worker '{}' is not registered", name);
         }
         Ok(())
     }
 
-    /// Get the path of a registered project
-    pub fn get_project_path(&self, name: &str) -> Result<PathBuf> {
-        // First check if it's a registered project name
-        if let Some(path) = self.projects.get(name) {
+    /// Get the path of a registered worker
+    pub fn get_worker_path(&self, name: &str) -> Result<PathBuf> {
+        // First check if it's a registered worker name
+        if let Some(path) = self.workers.get(name) {
             return Ok(path.clone());
         }
 
@@ -99,14 +96,14 @@ impl Settings {
         }
 
         anyhow::bail!(
-            "Project '{}' not found. Register it with: geoengine project register <path>",
+            "Worker '{}' not found. Run 'geoengine apply' to register it.",
             name
         )
     }
 
-    /// List all registered projects
-    pub fn list_projects(&self) -> Vec<(&str, &PathBuf)> {
-        self.projects
+    /// List all registered workers
+    pub fn list_workers(&self) -> Vec<(&str, &PathBuf)> {
+        self.workers
             .iter()
             .map(|(k, v)| (k.as_str(), v))
             .collect()

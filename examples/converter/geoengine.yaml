@@ -1,0 +1,36 @@
+name: converter
+version: '1.0.0'
+description: A geoengine worker
+command:
+  program: python3
+  script: main.py
+  inputs:
+  - name: input-dir
+    type: folder
+    required: true
+    description: Input folder to process
+  - name: output-dir
+    type: folder
+    required: true
+    description: Output folder for results
+  - name: to
+    type: enum
+    required: false
+    default: geotiff
+    description: Output format
+    enum_values:
+    - geotiff
+    - png
+    - jpeg
+local_dir_mounts:
+- host_path: ./data
+  container_path: /data
+  readonly: false
+- host_path: ./output
+  container_path: /output
+  readonly: false
+plugins:
+  arcgis: false
+  qgis: true
+deploy:
+  tenant_id: null

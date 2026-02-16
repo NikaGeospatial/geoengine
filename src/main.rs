@@ -1,7 +1,6 @@
 mod cli;
 mod config;
 mod docker;
-mod proxy;
 mod utils;
 
 use anyhow::Result;

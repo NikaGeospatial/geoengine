@@ -3,12 +3,19 @@
 GeoEngine QGIS Plugin - Main plugin class
 """
 
-from qgis.core import QgsApplication
-from qgis.PyQt.QtWidgets import QAction, QMessageBox
-from qgis.PyQt.QtGui import QIcon
 import os
 
-from .geoengine_provider import GeoEngineProvider
+from qgis.core import QgsApplication
+from qgis.PyQt.QtCore import QFileSystemWatcher
+from qgis.PyQt.QtWidgets import QAction, QMessageBox
+from qgis.PyQt.QtGui import QIcon
+
+from .geoengine_provider import GeoEngineProvider, GeoEngineCLIClient
+
+# Sentinel file that geoengine apply touches to signal a refresh
+_REFRESH_TRIGGER = os.path.join(
+    os.path.expanduser('~'), '.geoengine', '.qgis_refresh'
+)
 
 
 class GeoEnginePlugin:
@@ -26,30 +33,54 @@ class GeoEnginePlugin:
         self.provider = None
         self.actions = []
         self.menu = '&GeoEngine'
+        self._watcher = None
 
     def initProcessing(self):
         """Initialize the processing provider."""
         self.provider = GeoEngineProvider()
         QgsApplication.processingRegistry().addProvider(self.provider)
 
+    def _setup_file_watcher(self):
+        """Watch the refresh trigger file so apply can push updates."""
+        # Ensure the trigger file exists so the watcher has something to track
+        trigger_dir = os.path.dirname(_REFRESH_TRIGGER)
+        os.makedirs(trigger_dir, exist_ok=True)
+        if not os.path.exists(_REFRESH_TRIGGER):
+            with open(_REFRESH_TRIGGER, 'w') as f:
+                f.write('')
+
+        self._watcher = QFileSystemWatcher()
+        self._watcher.addPath(_REFRESH_TRIGGER)
+        self._watcher.fileChanged.connect(self._on_trigger_changed)
+
+    def _on_trigger_changed(self, path):
+        """Called when the trigger file is modified by geoengine apply."""
+        self._do_silent_refresh()
+        # Re-watch: some OS's drop the watch after a write
+        if path not in self._watcher.files():
+            if os.path.exists(path):
+                self._watcher.addPath(path)
+
+    def _do_silent_refresh(self):
+        """Reload algorithms without any dialog popups."""
+        if self.provider:
+            QgsApplication.processingRegistry().removeProvider(self.provider)
+            self.provider = GeoEngineProvider()
+            QgsApplication.processingRegistry().addProvider(self.provider)
+
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
         # Initialize processing provider
         self.initProcessing()
+
+        # Start watching for external refresh triggers
+        self._setup_file_watcher()
 
         # Add menu action to check service status
         self.add_action(
             'geoengine_status',
             'Check GeoEngine Status',
             self.show_status,
-            menu=self.menu,
-        )
-
-        # Add menu action to refresh tools
-        self.add_action(
-            'geoengine_refresh',
-            'Refresh Tools',
-            self.refresh_tools,
             menu=self.menu,
         )
 
@@ -78,6 +109,11 @@ class GeoEnginePlugin:
 
     def unload(self):
         """Remove the plugin menu items and icons from QGIS GUI."""
+        # Stop watching
+        if self._watcher:
+            self._watcher.fileChanged.disconnect(self._on_trigger_changed)
+            self._watcher = None
+
         # Remove menu items
         for action in self.actions:
             self.iface.removePluginMenu(self.menu, action)
@@ -87,19 +123,19 @@ class GeoEnginePlugin:
             QgsApplication.processingRegistry().removeProvider(self.provider)
 
     def show_status(self):
-        """Show GeoEngine service status."""
+        """Show GeoEngine CLI status."""
         try:
-            from .geoengine_provider import GeoEngineClient
-            client = GeoEngineClient()
-            health = client.health_check()
-            projects = client.list_projects()
+            client = GeoEngineCLIClient()
+            info = client.version_check()
+            workers = client.list_workers()
 
-            msg = f"GeoEngine Service Status: {health['status']}\n"
-            msg += f"Version: {health['version']}\n\n"
-            msg += f"Registered Projects: {len(projects)}\n"
+            msg = f"GeoEngine: {info['version']}\n"
+            msg += f"Status: {info['status']}\n\n"
+            msg += f"Registered Workers: {len(workers)}\n"
 
-            for p in projects:
-                msg += f"  - {p['name']} ({p['tools_count']} tools)\n"
+            for w in workers:
+                has_tool = "yes" if w.get('has_tool', False) else "no"
+                msg += f"  - {w['name']} (tool: {has_tool})\n"
 
             QMessageBox.information(
                 self.iface.mainWindow(),
@@ -107,32 +143,17 @@ class GeoEnginePlugin:
                 msg
             )
 
-        except Exception as e:
+        except FileNotFoundError as e:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "GeoEngine Error",
-                f"Cannot connect to GeoEngine service:\n{e}\n\n"
-                "Make sure the service is running:\n"
-                "  geoengine service start"
+                f"{e}\n\n"
+                "Install geoengine and ensure it is on your PATH:\n"
+                "  https://github.com/NikaGeospatial/geoengine"
             )
-
-    def refresh_tools(self):
-        """Refresh the list of available tools."""
-        try:
-            if self.provider:
-                # Remove and re-add provider to refresh algorithms
-                QgsApplication.processingRegistry().removeProvider(self.provider)
-                self.provider = GeoEngineProvider()
-                QgsApplication.processingRegistry().addProvider(self.provider)
-
-                QMessageBox.information(
-                    self.iface.mainWindow(),
-                    "GeoEngine",
-                    "Tools refreshed successfully!"
-                )
         except Exception as e:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "GeoEngine Error",
-                f"Failed to refresh tools:\n{e}"
+                f"Error communicating with geoengine:\n{e}"
             )

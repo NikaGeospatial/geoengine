@@ -14,28 +14,16 @@ pub fn get_settings_file() -> Result<PathBuf> {
     Ok(get_config_dir()?.join("settings.yaml"))
 }
 
-/// Get the PID file path for the proxy service
-pub fn get_pid_file() -> Result<PathBuf> {
-    Ok(get_config_dir()?.join("service.pid"))
-}
-
-/// Get the log file path for the proxy service
-pub fn get_log_file() -> Result<PathBuf> {
-    let logs_dir = get_config_dir()?.join("logs");
-    std::fs::create_dir_all(&logs_dir)?;
-    Ok(logs_dir.join("service.log"))
-}
-
-/// Get the jobs directory for temporary job data
-pub fn get_jobs_dir() -> Result<PathBuf> {
-    let jobs_dir = get_config_dir()?.join("jobs");
-    std::fs::create_dir_all(&jobs_dir)?;
-    Ok(jobs_dir)
-}
-
 /// Get temporary directory for file transfers
 pub fn get_temp_dir() -> Result<PathBuf> {
     let temp_dir = get_config_dir()?.join("tmp");
     std::fs::create_dir_all(&temp_dir)?;
     Ok(temp_dir)
+}
+
+/// Get the state directory for worker apply state tracking
+pub fn get_state_dir() -> Result<PathBuf> {
+    let state_dir = get_config_dir()?.join("state");
+    std::fs::create_dir_all(&state_dir)?;
+    Ok(state_dir)
 }

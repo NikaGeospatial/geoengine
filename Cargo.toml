@@ -1,6 +1,6 @@
 [package]
 name = "geoengine"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["GeoEngine Team"]
 description = "Docker-based isolated runtime manager for geospatial workloads with ArcGIS Pro and QGIS integration"
@@ -27,12 +27,6 @@ serde_json = "1"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec", "io"] }
-
-# HTTP server for proxy service
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
 
 # Error handling
 anyhow = "1"
@@ -43,22 +37,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Utilities
-bytes = "1"
 dirs = "5"
 which = "6"
 indicatif = "0.17"
 colored = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
-async-trait = "0.1"
-
-# Process management
-sysinfo = "0.30"
-nix = { version = "0.28", features = ["signal", "process"] }
-
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["processthreadsapi", "handleapi"] }
+dialoguer = "0.12.0"
+sha2 = "0.10"
+regex = "1.12.3"
+semver = "1.0.27"
 
 [dev-dependencies]
 tempfile = "3"
