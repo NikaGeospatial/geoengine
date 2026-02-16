@@ -3,7 +3,7 @@ version: "1.0"
 description: "Deep learning-based land cover classification from satellite imagery"
 
 command:
-  program: python
+  program: python3
   script: main.py
   inputs:
     - name: input_file

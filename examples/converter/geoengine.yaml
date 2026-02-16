@@ -2,7 +2,7 @@ name: converter
 version: '1.0.0'
 description: A geoengine worker
 command:
-  program: python
+  program: python3
   script: main.py
   inputs:
   - name: input-dir

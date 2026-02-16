@@ -454,6 +454,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
     let mut yaml_content = String::from_utf8(yaml_content_u8)?;
 
     let mut plugin_change_msgs: Vec<String> = Vec::new();
+    let mut yaml_dirty = false;
 
     if cur_arcgis != prev_arcgis {
         if cur_arcgis && !verify_arcgis_plugin_installed()? {
@@ -480,6 +481,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                         Err(e) => {
                             res_arcgis = false;
                             set_plugin_flag_in_yaml(&mut yaml_content, "arcgis", false)?;
+                            yaml_dirty = true;
                             plugin_change_msgs.push(format!("{} {}",
                                 "×".red(),
                                 format!("ArcGIS plugin NOT installed: {}.", e).to_string()
@@ -494,6 +496,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                 _ => {
                     res_arcgis = false;
                     set_plugin_flag_in_yaml(&mut yaml_content, "arcgis", false)?;
+                    yaml_dirty = true;
                     plugin_change_msgs.push(format!("{} {}",
                         "×".red(),
                         "ArcGIS plugin installation rejected.".to_string()
@@ -537,6 +540,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                         Err(e) => {
                             res_qgis = false;
                             set_plugin_flag_in_yaml(&mut yaml_content, "qgis", false)?;
+                            yaml_dirty = true;
                             plugin_change_msgs.push(format!("{} {}",
                                 "×".red(),
                                 format!("QGIS plugin NOT installed: {}.", e).to_string()
@@ -551,6 +555,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                 _ => {
                     res_qgis = false;
                     set_plugin_flag_in_yaml(&mut yaml_content, "qgis", false)?;
+                    yaml_dirty = true;
                     plugin_change_msgs.push(format!("{} {}",
                         "×".red(),
                         "QGIS plugin NOT installed. Tool not registered.".to_string()
@@ -577,6 +582,17 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
     } else {
         println!("{} No plugin changes detected", "✓".green().bold());
     }
+
+    // 5b. If plugin flags were reverted, persist to disk and update saved config
+    let config = if yaml_dirty {
+        std::fs::write(&yaml_path, &yaml_content)
+            .with_context(|| format!("Failed to write reverted YAML to {}", yaml_path.display()))?;
+        let updated_config = WorkerConfig::load(&yaml_path)?;
+        yaml_store::save_config(&updated_config)?;
+        updated_config
+    } else {
+        config
+    };
 
     // 6. Recompute YAML hashes from current files; preserve build hashes from previous state.
     //    yaml_hash: full YAML file hash (used by `apply` change detection)
@@ -758,6 +774,27 @@ pub async fn run_worker(
             } else {
                 value.clone()
             }
+        } else if is_output {
+            // Output-like key whose path doesn't exist yet – create / resolve
+            // the parent directory so we can mount it into the container.
+            let parent = path.parent().unwrap_or(Path::new("."));
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create parent directory for output path: {}", value))?;
+            let abs_parent = parent
+                .canonicalize()
+                .with_context(|| format!("Failed to canonicalize parent of output path: {}", value))?;
+            let file_name = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("output_{}", output_counter));
+            let container_dir = format!("/mnt/output_{}", output_counter);
+            output_counter += 1;
+            extra_mounts.push((
+                abs_parent.to_string_lossy().to_string(),
+                container_dir.clone(),
+                false, // writable
+            ));
+            format!("{}/{}", container_dir, file_name)
         } else {
             value.clone()
         };
@@ -1116,13 +1153,13 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
                 Ok(config) => {
                     let is_registered = match choice {
                         0 => None,
-                        1 => config.plugins.as_ref().and_then(|p| p.arcgis),
-                        2 => config.plugins.as_ref().and_then(|p| p.qgis),
+                        1 => Some(config.plugins.as_ref().and_then(|p| p.arcgis).unwrap_or(false)),
+                        2 => Some(config.plugins.as_ref().and_then(|p| p.qgis).unwrap_or(false)),
                         _ => unreachable!(),
                     };
                     (config.command.is_some(), config.description, is_registered)
                 },
-                Err(_) => (false, None, None),
+                Err(_) => (false, None, if choice == 0 { None } else { Some(false) }),
             };
             match is_registered {
                 Some(t) => {
