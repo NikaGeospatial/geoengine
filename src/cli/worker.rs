@@ -512,7 +512,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                 "✓".green(),
                 format!("Tool {} from ArcGIS plugin.", "registered".green())
             ));
-        } else if !cur_qgis && verify_arcgis_plugin_installed()? {
+        } else if !cur_arcgis && verify_arcgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
                 format!("Tool {} from ArcGIS plugin.", "de-registered".red())
@@ -571,7 +571,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                     ));
                 },
             }
-        } else if cur_arcgis && verify_qgis_plugin_installed()? {
+        } else if cur_qgis && verify_qgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
                 format!("Tool {} from QGIS plugin.", "registered".green())
@@ -734,7 +734,6 @@ pub async fn run_worker(
     // Build extra mounts from input values that are explicitly defined as
     // file/folder inputs in worker config.
     let mut extra_mounts: Vec<(String, String, bool)> = Vec::new();
-    let mut input_counter = 0usize;
     let input_definitions: HashMap<String, (String, bool)> = cmd_config
         .inputs
         .as_ref()
@@ -810,8 +809,7 @@ pub async fn run_worker(
                     let abs_path = path
                         .canonicalize()
                         .with_context(|| format!("Failed to resolve input directory path: {}", value))?;
-                    let container_path = format!("/mnt/input_{}", input_counter);
-                    input_counter += 1;
+                    let container_path = format!("/mnt/input_{}", key);
                     extra_mounts.push((
                         abs_path.to_string_lossy().to_string(),
                         container_path.clone(),

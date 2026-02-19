@@ -21,8 +21,8 @@ from qgis.core import (
     QgsProcessingParameterFile,
     QgsProcessingParameterEnum,
     QgsProcessingProvider,
+    QgsSettings
 )
-from qgis.PyQt.QtCore import QSettings
 
 
 # ---------------------------------------------------------------------------
@@ -34,12 +34,14 @@ DEV_MODE_SETTING_KEY = "geoengine/dev_mode"
 
 def is_dev_mode_enabled() -> bool:
     """Return whether QGIS settings enable GeoEngine dev image execution."""
-    return QSettings().value(DEV_MODE_SETTING_KEY, False, type=bool)
+    return QgsSettings().value(DEV_MODE_SETTING_KEY, False, type=bool)
 
 
 def set_dev_mode_enabled(enabled: bool) -> None:
     """Persist the GeoEngine dev-mode setting in QGIS preferences."""
-    QSettings().setValue(DEV_MODE_SETTING_KEY, bool(enabled))
+    s = QgsSettings()
+    s.setValue(DEV_MODE_SETTING_KEY, enabled)
+    s.sync()
 
 class GeoEngineCLIClient:
     """Client that invokes the geoengine CLI binary via subprocess."""

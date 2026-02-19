@@ -150,7 +150,7 @@ impl WorkerConfig {
                         default: None,
                         description: Some("Output folder for results".to_string()),
                         enum_values: None,
-                        readonly: Some(true),
+                        readonly: Some(false),
                     },
                     InputParameter {
                         name: "format".to_string(),
