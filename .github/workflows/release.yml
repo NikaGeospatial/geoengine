@@ -34,6 +34,10 @@ jobs:
             os: macos-latest
             name: geoengine-darwin-aarch64
 
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: geoengine-windows-x86_64
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,16 +60,32 @@ jobs:
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
+        if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar -czvf ../../../${{ matrix.name }}.tar.gz geoengine
           cd ../../..
 
-      - name: Upload artifact
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path geoengine.exe -DestinationPath ../../../${{ matrix.name }}.zip
+          cd ../../..
+
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}.tar.gz
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.zip
 
   release:
     name: Create Release
@@ -86,7 +106,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.tar.gz
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
