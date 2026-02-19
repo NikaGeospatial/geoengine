@@ -510,12 +510,12 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         } else if cur_arcgis && verify_arcgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
-                "Tool registered in ArcGIS plugin.".to_string()
+                format!("Tool {} from ArcGIS plugin.", "registered".green())
             ));
-        } else if !cur_qgis && verify_qgis_plugin_installed()? {
+        } else if !cur_qgis && verify_arcgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
-                "✓".red(),
-                "Tool de-registered from ArcGIS plugin.".to_string()
+                "✓".green(),
+                format!("Tool {} from ArcGIS plugin.", "de-registered".red())
             ));
         };
     }
@@ -571,15 +571,15 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                     ));
                 },
             }
-        } else if cur_qgis && verify_qgis_plugin_installed()? {
+        } else if cur_arcgis && verify_qgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
-                "Tool registered in QGIS plugin.".to_string()
+                format!("Tool {} from QGIS plugin.", "registered".green())
             ));
         } else if !cur_qgis && verify_qgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
-                "✓".red(),
-                "Tool de-registered from QGIS plugin.".to_string()
+                "✓".green(),
+                format!("Tool {} from QGIS plugin.", "de-registered".red())
             ));
         };
     }
