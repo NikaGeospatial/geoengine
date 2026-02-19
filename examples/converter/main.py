@@ -1,3 +1,5 @@
+"""Batch image conversion helpers with optional GeoTIFF-aware processing."""
+
 from __future__ import annotations
 
 import argparse
@@ -31,6 +33,7 @@ TARGETS = {
 
 @dataclass(frozen=True)
 class Options:
+    """Runtime options for batch and direct image conversion operations."""
     input_dir: Path
     output_dir: Path
     to: str
@@ -43,6 +46,7 @@ class Options:
 
 
 def iter_images(root: Path, recursive: bool) -> Iterable[Path]:
+    """Yield supported image files from a directory tree."""
     if recursive:
         for p in root.rglob("*"):
             if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS:
@@ -54,10 +58,12 @@ def iter_images(root: Path, recursive: bool) -> Iterable[Path]:
 
 
 def ensure_parent(path: Path) -> None:
+    """Create the destination parent directory when it does not exist."""
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def resize_pil(img: Image.Image, max_size: Optional[int]) -> Image.Image:
+    """Resize an image so its longest edge is at most `max_size`."""
     if not max_size:
         return img
     w, h = img.size
@@ -71,6 +77,7 @@ def resize_pil(img: Image.Image, max_size: Optional[int]) -> Image.Image:
 
 
 def rasterio_to_pil(ds: rasterio.DatasetReader) -> Image.Image:
+    """Convert a rasterio dataset to a Pillow image."""
     data = ds.read()  # (count, H, W)
     count, h, w = data.shape
 
@@ -99,6 +106,7 @@ def rasterio_to_pil(ds: rasterio.DatasetReader) -> Image.Image:
 
 
 def pil_to_rasterio_arr(img: Image.Image) -> np.ndarray:
+    """Convert a Pillow image to a CxHxW uint8 array for rasterio writes."""
     img = img.copy()
     if img.mode not in ("L", "RGB", "RGBA"):
         img = img.convert("RGB")
@@ -111,6 +119,7 @@ def pil_to_rasterio_arr(img: Image.Image) -> np.ndarray:
 
 
 def save_pil(img: Image.Image, out_path: Path, to_key: str, quality: int) -> None:
+    """Save an image through Pillow using output settings for the target format."""
     ext, fmt = TARGETS[to_key]
 
     # JPEG can't handle alpha
@@ -211,6 +220,7 @@ def _convert_image(
     max_size: Optional[int],
     quality: int,
 ) -> Tuple[bool, str]:
+    """Convert one image path to the requested output format."""
     out_ext, out_fmt = TARGETS[to_key]
     src_ext = src_path.suffix.lower()
 
@@ -259,6 +269,7 @@ def _convert_image(
 
 
 def convert_one(src: Path, dst: Path, opts: Options) -> Tuple[bool, str]:
+    """Convert one file using the `Options` container."""
     if dst.exists() and not opts.overwrite:
         return False, "Skipped (exists)"
 
@@ -278,6 +289,7 @@ def convert_one_direct(src: Path,
                        compress: str = "deflate",
                        max_size: int = None,
                        quality: int = 92) -> Tuple[bool, str]:
+    """Convert one file using direct keyword arguments."""
     src_path = Path(src)
     dst_path = Path(dst)
     if dst_path.exists() and not overwrite:
@@ -294,6 +306,7 @@ def convert_one_direct(src: Path,
 
 
 def run_batch(opts: Options) -> int:
+    """Convert all supported files in the configured input directory."""
     opts.output_dir.mkdir(parents=True, exist_ok=True)
     any_fail = False
 
@@ -313,6 +326,7 @@ def run_batch(opts: Options) -> int:
 
 
 def parse_args() -> Options:
+    """Build command-line arguments and return a validated `Options` object."""
     parser = argparse.ArgumentParser(
         prog="imgconv",
         description="Batch convert images in a folder (JPEG/PNG/BMP/WebP/TIFF/GeoTIFF).",
@@ -351,6 +365,7 @@ def parse_args() -> Options:
 
 
 def main() -> None:
+    """Run the CLI entrypoint and exit with the batch status code."""
     opts = parse_args()
     raise SystemExit(run_batch(opts))
 

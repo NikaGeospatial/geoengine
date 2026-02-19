@@ -10,7 +10,12 @@ from qgis.PyQt.QtCore import QFileSystemWatcher
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.PyQt.QtGui import QIcon
 
-from .geoengine_provider import GeoEngineProvider, GeoEngineCLIClient
+from .geoengine_provider import (
+    GeoEngineProvider,
+    GeoEngineCLIClient,
+    is_dev_mode_enabled,
+    set_dev_mode_enabled,
+)
 
 # Sentinel file that geoengine apply touches to signal a refresh
 _REFRESH_TRIGGER = os.path.join(
@@ -83,6 +88,13 @@ class GeoEnginePlugin:
             self.show_status,
             menu=self.menu,
         )
+
+        dev_mode_action = QAction('Developer Mode (use dev worker images)', self.iface.mainWindow())
+        dev_mode_action.setCheckable(True)
+        dev_mode_action.setChecked(is_dev_mode_enabled())
+        dev_mode_action.triggered.connect(self.toggle_dev_mode)
+        self.iface.addPluginToMenu(self.menu, dev_mode_action)
+        self.actions.append(dev_mode_action)
 
     def add_action(
         self,
@@ -157,3 +169,9 @@ class GeoEnginePlugin:
                 "GeoEngine Error",
                 f"Error communicating with geoengine:\n{e}"
             )
+
+    def toggle_dev_mode(self, enabled):
+        """Toggle worker execution mode between release and dev images."""
+        set_dev_mode_enabled(bool(enabled))
+        mode = "enabled" if enabled else "disabled"
+        self.iface.messageBar().pushInfo("GeoEngine", f"Dev mode {mode}")

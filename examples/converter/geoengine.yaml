@@ -13,6 +13,7 @@ command:
     type: folder
     required: true
     description: Output folder for results
+    readonly: false
   - name: to
     type: enum
     required: false

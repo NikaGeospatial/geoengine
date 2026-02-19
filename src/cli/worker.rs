@@ -510,7 +510,12 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         } else if cur_arcgis && verify_arcgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
-                "Tool registered in ArcGIS plugin.".to_string()
+                format!("Tool {} from ArcGIS plugin.", "registered".green())
+            ));
+        } else if !cur_arcgis && verify_arcgis_plugin_installed()? {
+            plugin_change_msgs.push(format!("{} {}",
+                "✓".green(),
+                format!("Tool {} from ArcGIS plugin.", "de-registered".red())
             ));
         };
     }
@@ -569,7 +574,12 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         } else if cur_qgis && verify_qgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
-                "Tool registered in QGIS plugin.".to_string()
+                format!("Tool {} from QGIS plugin.", "registered".green())
+            ));
+        } else if !cur_qgis && verify_qgis_plugin_installed()? {
+            plugin_change_msgs.push(format!("{} {}",
+                "✓".green(),
+                format!("Tool {} from QGIS plugin.", "de-registered".red())
             ));
         };
     }
@@ -721,80 +731,94 @@ pub async fn run_worker(
         inputs.insert(parts[0].to_string(), parts[1].to_string());
     }
 
-    // Build extra mounts from input values that are file/folder paths
+    // Build extra mounts from input values that are explicitly defined as
+    // file/folder inputs in worker config.
     let mut extra_mounts: Vec<(String, String, bool)> = Vec::new();
-    let mut input_counter = 0usize;
-    let mut output_counter = 0usize;
+    let input_definitions: HashMap<String, (String, bool)> = cmd_config
+        .inputs
+        .as_ref()
+        .map(|defs| {
+            defs.iter()
+                .map(|d| {
+                    (
+                        d.name.clone(),
+                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true)),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Build script arguments from inputs
     let mut script_args: Vec<String> = Vec::new();
     for (key, value) in &inputs {
-        // Check if the value is a file or directory path that needs mounting
+        // Only auto-mount for declared file/folder inputs.
         let path = Path::new(value);
-        let is_output = is_output_like_input_key(key);
-        let processed_value = if path.exists() {
-            if path.is_file() {
-                if let Some(filename) = path.file_name() {
+        let processed_value = if let Some((param_type, readonly)) = input_definitions.get(key) {
+            match param_type.as_str() {
+                "file" => {
+                    if !path.exists() {
+                        anyhow::bail!(
+                            "Input '{}' is declared as type 'file' but path does not exist: {}",
+                            key,
+                            value
+                        );
+                    }
+                    if !path.is_file() {
+                        anyhow::bail!(
+                            "Input '{}' is declared as type 'file' but received a non-file path: {}",
+                            key,
+                            value
+                        );
+                    }
+
+                    let filename = path.file_name().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Input '{}' is declared as type 'file' but has no file name: {}",
+                            key,
+                            value
+                        )
+                    })?;
                     let abs_path = path
                         .canonicalize()
-                        .with_context(|| format!("Failed to resolve input path: {}", value))?;
-                    let container_path = if is_output {
-                        format!("/outputs/{}/{}", key, filename.to_string_lossy())
-                    } else {
-                        format!("/inputs/{}/{}", key, filename.to_string_lossy())
-                    };
+                        .with_context(|| format!("Failed to resolve input file path: {}", value))?;
+                    let container_path = format!("/inputs/{}/{}", key, filename.to_string_lossy());
                     extra_mounts.push((
                         abs_path.to_string_lossy().to_string(),
                         container_path.clone(),
-                        !is_output,
+                        *readonly,
                     ));
                     container_path
-                } else {
-                    value.clone()
                 }
-            } else if path.is_dir() {
-                let abs_path = path
-                    .canonicalize()
-                    .with_context(|| format!("Failed to resolve input directory: {}", value))?;
-                let container_path = if is_output {
-                    let p = format!("/mnt/output_{}", output_counter);
-                    output_counter += 1;
-                    p
-                } else {
-                    let p = format!("/mnt/input_{}", input_counter);
-                    input_counter += 1;
-                    p
-                };
-                extra_mounts.push((
-                    abs_path.to_string_lossy().to_string(),
-                    container_path.clone(),
-                    !is_output,
-                ));
-                container_path
-            } else {
-                value.clone()
+                "folder" => {
+                    if !path.exists() {
+                        anyhow::bail!(
+                            "Input '{}' is declared as type 'folder' but path does not exist: {}",
+                            key,
+                            value
+                        );
+                    }
+                    if !path.is_dir() {
+                        anyhow::bail!(
+                            "Input '{}' is declared as type 'folder' but received a non-directory path: {}",
+                            key,
+                            value
+                        );
+                    }
+
+                    let abs_path = path
+                        .canonicalize()
+                        .with_context(|| format!("Failed to resolve input directory path: {}", value))?;
+                    let container_path = format!("/mnt/input_{}", key);
+                    extra_mounts.push((
+                        abs_path.to_string_lossy().to_string(),
+                        container_path.clone(),
+                        *readonly,
+                    ));
+                    container_path
+                }
+                _ => value.clone(),
             }
-        } else if is_output {
-            // Output-like key whose path doesn't exist yet – create / resolve
-            // the parent directory so we can mount it into the container.
-            let parent = path.parent().unwrap_or(Path::new("."));
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent directory for output path: {}", value))?;
-            let abs_parent = parent
-                .canonicalize()
-                .with_context(|| format!("Failed to canonicalize parent of output path: {}", value))?;
-            let file_name = path
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("output_{}", output_counter));
-            let container_dir = format!("/mnt/output_{}", output_counter);
-            output_counter += 1;
-            extra_mounts.push((
-                abs_parent.to_string_lossy().to_string(),
-                container_dir.clone(),
-                false, // writable
-            ));
-            format!("{}/{}", container_dir, file_name)
         } else {
             value.clone()
         };
@@ -1499,14 +1523,4 @@ fn shell_escape(s: &str) -> String {
     } else {
         s.to_string()
     }
-}
-
-fn is_output_like_input_key(key: &str) -> bool {
-    let normalized = key.to_ascii_lowercase().replace('-', "_");
-    normalized.contains("output")
-        || normalized == "out"
-        || normalized == "dst"
-        || normalized == "dest"
-        || normalized == "destination"
-        || normalized.starts_with("out_")
 }

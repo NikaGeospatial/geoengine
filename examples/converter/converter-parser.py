@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""CLI wrapper that loads and executes `convert_one_direct` from `main.py`."""
+
 import argparse
 import importlib.util
 import json
@@ -11,6 +13,7 @@ PY_FILE = (Path(__file__).resolve().parent / "main.py").resolve()
 FUNCTION = "convert_one_direct"
 
 def load_function(py_file, function_name):
+    """Load a function object from a Python source file path."""
     module_name = "geoengine_user_module"
     spec = importlib.util.spec_from_file_location(module_name, py_file)
     if spec is None or spec.loader is None:
@@ -21,6 +24,7 @@ def load_function(py_file, function_name):
     return getattr(mod, function_name)
 
 def parse_bool(value):
+    """Parse common truthy/falsey strings into a boolean value."""
     v = str(value).strip().lower()
     if v in ("1", "true", "yes", "y", "on"):
         return True
@@ -29,6 +33,7 @@ def parse_bool(value):
     raise argparse.ArgumentTypeError(f"Invalid bool: {value}")
 
 def main():
+    """Parse CLI arguments, run the converter, and print JSON-safe output."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--src', dest='src', type=str, required=True, help="Auto-generated for 'src'")
     parser.add_argument('--to', dest='to', type=str, required=True, help="Auto-generated for 'to'")
