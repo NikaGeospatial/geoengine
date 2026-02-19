@@ -22,16 +22,30 @@ from qgis.core import (
     QgsProcessingParameterEnum,
     QgsProcessingProvider,
 )
+from qgis.PyQt.QtCore import QSettings
 
 
 # ---------------------------------------------------------------------------
 # CLI Client
 # ---------------------------------------------------------------------------
 
+DEV_MODE_SETTING_KEY = "geoengine/dev_mode"
+
+
+def is_dev_mode_enabled() -> bool:
+    """Return whether QGIS settings enable GeoEngine dev image execution."""
+    return QSettings().value(DEV_MODE_SETTING_KEY, False, type=bool)
+
+
+def set_dev_mode_enabled(enabled: bool) -> None:
+    """Persist the GeoEngine dev-mode setting in QGIS preferences."""
+    QSettings().setValue(DEV_MODE_SETTING_KEY, bool(enabled))
+
 class GeoEngineCLIClient:
     """Client that invokes the geoengine CLI binary via subprocess."""
 
     def __init__(self):
+        """Resolve the GeoEngine binary location."""
         self.binary = self._find_binary()
 
     @staticmethod
@@ -62,6 +76,7 @@ class GeoEngineCLIClient:
         )
 
     def version_check(self) -> Dict:
+        """Return a health payload containing the CLI version string."""
         result = subprocess.run(
             [self.binary, '--version'],
             capture_output=True, text=True, timeout=10
@@ -71,6 +86,7 @@ class GeoEngineCLIClient:
         return {'status': 'healthy', 'version': result.stdout.strip()}
 
     def list_workers(self) -> List[Dict]:
+        """List worker descriptors available for QGIS integration."""
         result = subprocess.run(
             [self.binary, 'workers', '--json', '--gis', 'qgis'],
             capture_output=True, text=True, timeout=30
@@ -95,6 +111,7 @@ class GeoEngineCLIClient:
         inputs: Dict[str, Any],
         on_output: Optional[Callable[[str], None]] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        dev_mode: Optional[bool] = None,
     ) -> Dict:
         """Run a worker synchronously, streaming container output via on_output.
 
@@ -102,6 +119,10 @@ class GeoEngineCLIClient:
         File paths are auto-mounted into the container.
         """
         cmd = [self.binary, 'run', worker, '--json']
+        if dev_mode is None:
+            dev_mode = is_dev_mode_enabled()
+        if dev_mode:
+            cmd.append('--dev')
 
         for key, value in inputs.items():
             if value is not None:
@@ -159,29 +180,37 @@ class GeoEngineProvider(QgsProcessingProvider):
     """QGIS Processing provider for GeoEngine tools."""
 
     def __init__(self):
+        """Initialize the provider and its algorithm cache."""
         super().__init__()
         self._algorithms = []
 
     def load(self) -> bool:
+        """Populate provider algorithms and report load success."""
         self._algorithms = self._discover_algorithms()
         return True
 
     def unload(self):
+        """Unload provider resources (no-op)."""
         pass
 
     def id(self) -> str:
+        """Return the stable provider identifier."""
         return 'geoengine'
 
     def name(self) -> str:
+        """Return the short provider display name."""
         return 'GeoEngine'
 
     def longName(self) -> str:
+        """Return the long provider display name."""
         return 'GeoEngine Containerized Geoprocessing'
 
     def icon(self):
+        """Return the provider icon shown by QGIS."""
         return QgsProcessingProvider.icon(self)
 
     def loadAlgorithms(self):
+        """Register cached algorithms with QGIS."""
         for alg in self._algorithms:
             self.addAlgorithm(alg)
 
@@ -216,27 +245,34 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
     """Dynamic QGIS Processing algorithm for a GeoEngine worker."""
 
     def __init__(self, worker_name: str, tool_info: Dict):
+        """Initialize an algorithm wrapper for a worker definition."""
         super().__init__()
         self._worker = worker_name
         self._tool = tool_info
         self._inputs = tool_info.get('inputs', [])
 
     def createInstance(self):
+        """Create a new algorithm instance for QGIS cloning."""
         return GeoEngineAlgorithm(self._worker, self._tool)
 
     def name(self) -> str:
+        """Return the algorithm id used by QGIS processing."""
         return self._worker
 
     def displayName(self) -> str:
+        """Return the human-readable algorithm name."""
         return self._tool.get('name', self._worker)
 
     def group(self) -> str:
+        """Return the group label for this algorithm."""
         return ''
 
     def groupId(self) -> str:
+        """Return the group identifier for this algorithm."""
         return ''
 
     def shortHelpString(self) -> str:
+        """Return help text sourced from the worker description."""
         return self._tool.get('description', '')
 
     def initAlgorithm(self, config=None):

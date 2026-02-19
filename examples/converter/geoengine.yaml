@@ -31,6 +31,6 @@ local_dir_mounts:
   readonly: false
 plugins:
   arcgis: false
-  qgis: true
+  qgis: false
 deploy:
   tenant_id: null

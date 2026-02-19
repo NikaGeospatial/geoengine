@@ -64,6 +64,10 @@ pub struct InputParameter {
     /// Possible values (only for type: enum)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
+
+    /// Mark as readonly (only for types folder and file, defaults to true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
 }
 
 /// Volume mount configuration
@@ -137,6 +141,7 @@ impl WorkerConfig {
                         default: None,
                         description: Some("Input file to process".to_string()),
                         enum_values: None,
+                        readonly: Some(true),
                     },
                     InputParameter {
                         name: "output_folder".to_string(),
@@ -145,6 +150,7 @@ impl WorkerConfig {
                         default: None,
                         description: Some("Output folder for results".to_string()),
                         enum_values: None,
+                        readonly: Some(true),
                     },
                     InputParameter {
                         name: "format".to_string(),
@@ -157,6 +163,7 @@ impl WorkerConfig {
                             "png".to_string(),
                             "jpeg".to_string(),
                         ]),
+                        readonly: None,
                     },
                 ]),
             }),

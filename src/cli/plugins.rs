@@ -54,6 +54,19 @@ pub async fn register_qgis(custom_path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Debug helper that installs the QGIS plugin only when missing.
+pub async fn debug_qgis() -> Result<()> {
+    if verify_qgis_plugin_installed()? {
+        println!(
+            "{} QGIS plugin is already installed. No action taken.",
+            "=>".yellow().bold()
+        );
+        return Ok(());
+    }
+
+    register_qgis(None).await
+}
+
 fn missing_files(base: &PathBuf, required: &[&str]) -> Vec<String> {
     required
         .iter()
