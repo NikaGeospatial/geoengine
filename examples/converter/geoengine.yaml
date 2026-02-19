@@ -13,6 +13,7 @@ command:
     type: folder
     required: true
     description: Output folder for results
+    readonly: false
   - name: to
     type: enum
     required: false
@@ -31,6 +32,6 @@ local_dir_mounts:
   readonly: false
 plugins:
   arcgis: false
-  qgis: false
+  qgis: true
 deploy:
   tenant_id: null
