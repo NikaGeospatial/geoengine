@@ -18,6 +18,3 @@ xarray = "*"
 pyproj = ">=3.6,<4"
 gdal = ">=3.9.0,<4"
 zarr = "*"
-
-[pypi-dependencies]
-argparse = "*"

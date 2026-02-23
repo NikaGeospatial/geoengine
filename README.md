@@ -445,7 +445,7 @@ contains your script, then prompt the agent your needs. For example (in `example
 ```aiignore
 Make the function `run_hotspot_analysis_from_files()` from `hotspot_analysis.py` a GeoEngine worker.
 ```
-The agent will then run the whole process stipulated above automatically, even creating an argument parser if not already availble
+The agent will then run the whole process stipulated above automatically, even creating an argument parser if not already available
 in the script.
 
 ## Building from Source

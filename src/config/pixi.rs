@@ -9,7 +9,7 @@ pub struct PixiConfig {
     #[serde(default)]
     dependencies: HashMap<String, PixiDepSpec>,
     /// PyPI dependencies to be installed in the environment
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "pypi-dependencies")]
     pypi_dependencies: Option<HashMap<String, PixiDepSpec>>,
 }
 
@@ -76,9 +76,7 @@ impl PixiConfig {
                     ("xarray".to_string(), PixiDepSpec::Simple("*".to_string())),
                 ]
             ),
-            pypi_dependencies: Some(HashMap::from(
-                [("argparse".to_string(), PixiDepSpec::Simple("*".to_string())),]
-            )),
+            pypi_dependencies: None,
         }
     }
 

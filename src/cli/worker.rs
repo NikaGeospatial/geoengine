@@ -834,12 +834,6 @@ pub async fn run_worker(
                                 continue
                             },
                         }
-                    } else if !path.is_file() {
-                        anyhow::bail!(
-                            "Input '{}' is declared as type 'file' but received a non-file path: {}",
-                            key,
-                            value
-                        );
                     } else if !path.exists() {
                         match readonly {
                             true => anyhow::bail!(
@@ -849,6 +843,12 @@ pub async fn run_worker(
                             ),
                             false => File::create(path)?,
                         };
+                    } else if !path.is_file() {
+                        anyhow::bail!(
+                            "Input '{}' is declared as type 'file' but received a non-file path: {}",
+                            key,
+                            value
+                        );
                     }
 
                     let filename = path.file_name().ok_or_else(|| {
@@ -885,12 +885,6 @@ pub async fn run_worker(
                                 continue
                             },
                         }
-                    } else if !path.is_dir() {
-                        anyhow::bail!(
-                            "Input '{}' is declared as type 'folder' but received a non-directory path: {}",
-                            key,
-                            value
-                        );
                     } else if !path.exists() {
                         match readonly {
                             true => anyhow::bail!(
@@ -900,6 +894,12 @@ pub async fn run_worker(
                             ),
                             false => std::fs::create_dir_all(path)?,
                         };
+                    } else if !path.is_dir() {
+                        anyhow::bail!(
+                            "Input '{}' is declared as type 'folder' but received a non-directory path: {}",
+                            key,
+                            value
+                        );
                     }
 
                     let abs_path = path

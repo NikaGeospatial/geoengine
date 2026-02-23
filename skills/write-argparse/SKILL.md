@@ -378,7 +378,7 @@ suppressPackageStartupMessages(library(optparse))
 
 option_list <- list(
   make_option(
-    c("-i", "--input-file"),
+    c("-f", "--input-file"),
     type    = "character",
     default = NULL,
     dest    = "input_file",

@@ -99,21 +99,21 @@ option_list <- list(
   make_option(
     c("-o", "--output-dir"),
     type    = "character",
-    default = "output",
+    default = NULL,
     dest    = "output_dir",
-    help    = "Output directory for NDVI results [default: output]"
+    help    = "Output directory for NDVI results (required)"
   ),
   make_option(
     c("-r", "--red-band"),
-    type    = "integer",
-    default = 4L,
+    type    = "double",
+    default = 4,
     dest    = "red_band",
     help    = "Band index for red reflectance [default: 4 (Landsat 8/9)]"
   ),
   make_option(
     c("-n", "--nir-band"),
-    type    = "integer",
-    default = 5L,
+    type    = "double",
+    default = 5,
     dest    = "nir_band",
     help    = "Band index for NIR reflectance [default: 5 (Landsat 8/9)]"
   ),
@@ -143,6 +143,11 @@ if (is.null(args$input_file)) {
   stop("--input-file is required.", call. = FALSE)
 }
 
+if (is.null(args$output_dir)) {
+  print_help(parser)
+  stop("--output-dir is required.", call. = FALSE)
+}
+
 if (!file.exists(args$input_file)) {
   stop(sprintf("Input file does not exist: %s", args$input_file), call. = FALSE)
 }
@@ -150,7 +155,7 @@ if (!file.exists(args$input_file)) {
 calculate_ndvi(
   input_file = normalizePath(args$input_file),
   output_dir = normalizePath(args$output_dir, mustWork = FALSE),
-  red_band   = args$red_band,
-  nir_band   = args$nir_band,
+  red_band   = as.integer(args$red_band),
+  nir_band   = as.integer(args$nir_band),
   threshold  = args$threshold
 )

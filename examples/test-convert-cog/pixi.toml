@@ -18,6 +18,3 @@ xarray = "*"
 geopandas = ">=0.14,<1"
 zarr = "*"
 scipy = ">=1.11,<2"
-
-[pypi-dependencies]
-argparse = "*"

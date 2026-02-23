@@ -42,7 +42,7 @@ fn generate_dockerfile_runtime(dockerfile: &mut File, script_path: &str) -> anyh
     dockerfile.write_all(b"COPY --from=build /pixi/pixi.toml /pixi/pixi.toml\n\n")?;
     
     // Copy user's script
-    dockerfile.write_all(format!("COPY {} ./\n\n", script_path).as_bytes())?;
+    dockerfile.write_all(format!("COPY {} ./{}\n\n", script_path, script_path).as_bytes())?;
 
     // Set up environment variables
     dockerfile.write_all(b"ENV PATH=\"/pixi/.pixi/envs/default/bin:${PATH}\"\n")?;
@@ -57,6 +57,10 @@ fn generate_dockerfile_runtime(dockerfile: &mut File, script_path: &str) -> anyh
 }
 
 pub fn generate_dockerfile(path: &PathBuf, script_path: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !script_path.contains('\n') && !script_path.is_empty(),
+        "script_path must be a single non-empty path"
+    );
     let docker_path = Path::new(path).join("Dockerfile");
     let mut file = File::create(docker_path)?;
     // build stage

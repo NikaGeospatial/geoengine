@@ -143,13 +143,10 @@ numpy = ">=1.26,<3"
 pip = "*"
 gdal = ">=3.9.0,<4"
 pyproj = ">=3.6,<4"
-
-[pypi-dependencies]
-argparse = "*"
 # Add Python-only packages here
 ```
 
-These 12 base conda-forge dependencies and 1 PyPI dependency form GeoEngine's standard Python geospatial
+These 12 base conda-forge dependencies form GeoEngine's standard Python geospatial
 environment are included in the base template. Do **not** touch these dependencies,
 and do **not** include the R geospatial base packages.
 
@@ -345,7 +342,7 @@ scikit-learn, scikit-image, matplotlib, cartopy, basemap
 Pure-Python packages or packages not on conda-forge:
 
 ```
-pillow, argparse, flask, fastapi, pydantic, httpx, click,
+pillow, flask, fastapi, pydantic, httpx, click,
 rich, typer, loguru, tqdm (also on conda, but fine either way)
 ```
 
