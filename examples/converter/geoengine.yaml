@@ -1,5 +1,5 @@
 name: converter
-version: '1.0.0'
+version: '1.0.1'
 description: A geoengine worker
 command:
   program: python3
@@ -31,7 +31,7 @@ local_dir_mounts:
   container_path: /output
   readonly: false
 plugins:
-  arcgis: false
-  qgis: true
+  arcgis: true
+  qgis: false
 deploy:
   tenant_id: null

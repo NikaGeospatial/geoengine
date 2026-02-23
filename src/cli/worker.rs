@@ -15,7 +15,7 @@ use crate::docker::config::ContainerConfig;
 use crate::docker::gpu::GpuConfig;
 use crate::docker::dockerfile::get_dockerfile_config;
 use crate::cli::plugins;
-use crate::cli::plugins::{verify_arcgis_plugin_installed, verify_qgis_plugin_installed};
+use crate::cli::plugins::{verify_arcgis_plugin_installed, verify_qgis_plugin_installed, find_arcgis_toolbox_dir, write_arcgis_worker_tool, remove_arcgis_worker_tool};
 use crate::utils::versioning::{compare_versions, validate_version, get_latest_worker_version_clientless, get_latest_worker_version, compare_worker_version};
 // ---------------------------------------------------------------------------
 // JSON output structs (used by --json flags and plugin integration)
@@ -520,6 +520,35 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         };
     }
 
+    // 5a-pyt. Sync GeoEngine.pyt — always runs based on the resolved res_arcgis value.
+    {
+        let toolbox_dir = find_arcgis_toolbox_dir()?;
+        if res_arcgis {
+            match write_arcgis_worker_tool(&toolbox_dir, &worker_name, &config) {
+                Ok(_) => plugin_change_msgs.push(format!("{} {}",
+                    "✓".green(),
+                    format!("Tool '{}' written to GeoEngine.pyt", worker_name)
+                )),
+                Err(e) => plugin_change_msgs.push(format!("{} {}",
+                    "!".yellow(),
+                    format!("Could not write GeoEngine.pyt: {}", e)
+                )),
+            }
+        } else if prev_arcgis {
+            // arcgis was enabled before — remove the tool class
+            match remove_arcgis_worker_tool(&toolbox_dir, &worker_name) {
+                Ok(_) => plugin_change_msgs.push(format!("{} {}",
+                    "✓".green(),
+                    format!("Tool '{}' removed from GeoEngine.pyt", worker_name)
+                )),
+                Err(e) => plugin_change_msgs.push(format!("{} {}",
+                    "!".yellow(),
+                    format!("Could not update GeoEngine.pyt: {}", e)
+                )),
+            }
+        }
+    }
+
     if cur_qgis != prev_qgis {
         if cur_qgis && !verify_qgis_plugin_installed()? {
             let install_qgis = Select::with_theme(&ColorfulTheme::default())
@@ -792,11 +821,20 @@ pub async fn run_worker(
                 }
                 "folder" => {
                     if !path.exists() {
-                        anyhow::bail!(
-                            "Input '{}' is declared as type 'folder' but path does not exist: {}",
-                            key,
-                            value
-                        );
+                        if *readonly {
+                            anyhow::bail!(
+                                "Input '{}' is declared as type 'folder' but path does not exist: {}",
+                                key,
+                                value
+                            );
+                        }
+                        // Writable (output) folder — create it automatically
+                        std::fs::create_dir_all(path).with_context(|| {
+                            format!(
+                                "Input '{}': failed to create output directory: {}",
+                                key, value
+                            )
+                        })?;
                     }
                     if !path.is_dir() {
                         anyhow::bail!(
@@ -904,11 +942,14 @@ pub async fn run_worker(
     }
 
     // Run the container
-    let client = DockerClient::new().await?;
+    let client = DockerClient::new().await
+        .context("Failed to create Docker client")?;
     let exit_code = if json_output {
-        client.run_container_attached_to_stderr(&container_config).await?
+        client.run_container_attached_to_stderr(&container_config).await
+            .context("Failed to run container (attached to stderr)")?
     } else {
-        client.run_container_attached(&container_config).await?
+        client.run_container_attached(&container_config).await
+            .context("Failed to run container (attached)")?
     };
 
     // Handle output
