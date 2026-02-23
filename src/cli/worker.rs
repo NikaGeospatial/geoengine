@@ -158,7 +158,7 @@ pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
     }
 
     println!("\nNext steps:");
-    println!("  1. Edit geoengine.yaml an pixi.toml to configure your worker");
+    println!("  1. Edit geoengine.yaml and pixi.toml to configure your worker");
     println!("  2. Run {} to register and build", "geoengine apply".cyan());
 
     Ok(())
