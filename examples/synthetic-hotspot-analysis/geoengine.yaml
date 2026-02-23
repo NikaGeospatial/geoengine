@@ -1,0 +1,91 @@
+name: synthetic-hotspot-analysis
+version: "1.0.0"
+description: Spatial hotspot analysis from study area, incidents, and facilities layers
+command:
+  program: python
+  script: hotspot_analysis.py
+  inputs:
+    - name: study-area-path
+      type: file
+      required: true
+      description: Polygon study area layer
+      readonly: true
+    - name: incidents-path
+      type: file
+      required: true
+      description: Incidents layer (point or centroid-coercible geometry)
+      readonly: true
+    - name: facilities-path
+      type: file
+      required: true
+      description: Facilities layer (point or centroid-coercible geometry)
+      readonly: true
+    - name: output-folder
+      type: folder
+      required: true
+      description: Writable folder for grid.gpkg, hotspot_cells.gpkg, neighborhood_summary.csv, and run_summary.json
+      readonly: false
+    - name: neighborhoods-path
+      type: file
+      required: false
+      description: Optional polygon layer for neighborhood summaries
+      readonly: true
+    - name: severity-col
+      type: string
+      required: false
+      default: severity
+      description: Incident severity column name
+    - name: observed-at-col
+      type: string
+      required: false
+      default: observed_at
+      description: Incident datetime column for recency weighting
+    - name: neighborhood-name-col
+      type: string
+      required: false
+      default: name
+      description: Neighborhood name column
+    - name: analysis-date
+      type: datetime
+      required: false
+      description: Optional anchor datetime for recency calculations
+    - name: recency-halflife-days
+      type: number
+      required: false
+      default: 45.0
+      description: Recency half-life in days
+    - name: cell-size-m
+      type: number
+      required: false
+      default: 1200.0
+      description: Analysis grid cell size in meters
+    - name: idw-power
+      type: number
+      required: false
+      default: 1.8
+      description: IDW interpolation power
+    - name: idw-search-radius-m
+      type: number
+      required: false
+      default: 4500.0
+      description: IDW interpolation search radius in meters
+    - name: idw-max-neighbors
+      type: number
+      required: false
+      default: 30
+      description: Maximum IDW neighbors
+    - name: min-incidents-per-active-cell
+      type: number
+      required: false
+      default: 3
+      description: Minimum incidents for an active cell
+    - name: hotspot-quantile
+      type: number
+      required: false
+      default: 0.9
+      description: Active-cell hotspot score quantile threshold
+plugins:
+  arcgis: false
+  qgis: true
+deploy:
+  tenant_id: null

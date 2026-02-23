@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use bollard::container::{Config, CreateContainerOptions, LogsOptions, StartContainerOptions, WaitContainerOptions};
-use bollard::image::{BuildImageOptions, CreateImageOptions, ImportImageOptions, TagImageOptions};
+use bollard::image::{BuildImageOptions, BuilderVersion, CreateImageOptions, ImportImageOptions, TagImageOptions};
 use bollard::Docker;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
-use super::config::ContainerConfig;
+use super::container::ContainerConfig;
 
 /// Docker client wrapper for GeoEngine operations
 pub struct DockerClient {
@@ -223,6 +223,7 @@ impl DockerClient {
         tag: &str,
         build_args: &HashMap<String, String>,
         no_cache: bool,
+        verbose: bool,
     ) -> Result<()> {
         // Create tar archive of context
         let tar_path = std::env::temp_dir().join(format!("geoengine-build-{}-{}.tar", std::process::id(), chrono::Utc::now().timestamp()));
@@ -252,6 +253,12 @@ impl DockerClient {
             nocache: no_cache,
             buildargs: build_args.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
             rm: true,
+            version: BuilderVersion::BuilderBuildKit,
+            session: Some(format!(
+                "geoengine-buildkit-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            )),
             ..Default::default()
         };
 
@@ -263,7 +270,25 @@ impl DockerClient {
                     if let Some(stream) = info.stream {
                         let msg = stream.trim();
                         if !msg.is_empty() {
-                            tracing::info!("{}", msg);
+                            if verbose {
+                                println!("{}", msg);
+                            } else {
+                                tracing::info!("{}", msg);
+                            }
+                        }
+                    }
+                    if verbose {
+                        if let Some(status) = info.status {
+                            let progress = info.progress.unwrap_or_default();
+                            let id = info.id.unwrap_or_default();
+                            let line = [status, id, progress]
+                                .into_iter()
+                                .filter(|s| !s.trim().is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            if !line.is_empty() {
+                                println!("{}", line);
+                            }
                         }
                     }
                     if let Some(error) = info.error {

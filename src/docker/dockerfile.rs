@@ -1,90 +1,67 @@
 use std::fs::File;
-use std::io::{self, BufRead, Result};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use colored::Colorize;
-use crate::config::worker::{WorkerConfig, CommandConfig};
-use regex::Regex;
 
-pub fn get_dockerfile_config(current_dir: &PathBuf, config: &mut WorkerConfig) -> Result<()> {
-    let path = Path::new(&current_dir).join("Dockerfile");
-    let file_res = File::open(path);
+fn generate_dockerfile_build(dockerfile: &mut File) -> anyhow::Result<()> {
+    dockerfile.write("FROM ghcr.io/prefix-dev/pixi:0.41.4 AS build\n\n".as_bytes())?;
 
-    let file = match file_res {
-        Ok(file) => file,
-        Err(_) => {
-            println!("No Dockerfile found in current directory. Skipping discovery.");
-            return Ok(());
-        }
-    };
+    // Sandbox build environment in subfolder
+    dockerfile.write("WORKDIR /pixi\n\n".as_bytes())?;
 
-    let reader = io::BufReader::new(file);
-    let mut iter = reader.lines().peekable();
-    let mut entry = false;
+    // Copy pixi configuration
+    dockerfile.write("COPY pixi.toml ./\n\n".as_bytes())?;
 
-    println!("Found Dockerfile, discovering configurations...");
+    // Install base environment with GDAL
+    dockerfile.write("RUN pixi install\n\n".as_bytes())?;
 
-    while let Some(line_result) = iter.next() {
-        let line = line_result?;
-        let line_trimmed = line.trim();
-        let (key, value) = map_dockerfile_line(line_trimmed, iter.peek().is_none(), entry)
-            .unwrap_or_else(|| (String::new(), String::new()));
-        match key.as_str() {
-            "handler" => {
-                entry = true;
-                println!("{} discovered: {}", "command".bold(), value.cyan());
-                // Split handler into program + script (e.g., "python main.py")
-                let parts: Vec<&str> = value.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    config.command = Some(CommandConfig {
-                        program: parts[0].to_string(),
-                        script: parts[1..].join(" "),
-                        inputs: config.command.as_ref().and_then(|c| c.inputs.clone()),
-                    });
-                } else if parts.len() == 1 {
-                    config.command = Some(CommandConfig {
-                        program: parts[0].to_string(),
-                        script: String::new(),
-                        inputs: config.command.as_ref().and_then(|c| c.inputs.clone()),
-                    });
-                }
-            },
-            _ => {}
-        }
-    }
-    println!();
-    println!("Discovery complete and reflected in config file.");
-    println!("{} {} {}", "Do".bold(), "not".red().bold(), "change the above values manually.".bold());
-    println!("Run `geoengine apply` to apply changes from Dockerfile.");
+    // Generate shell hook for activation
+    dockerfile.write("RUN pixi shell-hook -s bash > /shell-hook\n\n".as_bytes())?;
+
+    // Create entrypoint script
+    dockerfile.write("RUN echo '#!/bin/bash' > /pixi/entrypoint.sh && \\\n".as_bytes())?;
+    dockerfile.write("\tcat /shell-hook >> /pixi/entrypoint.sh && \\\n".as_bytes())?;
+    dockerfile.write("\techo 'exec \"$@\"' >> /pixi/entrypoint.sh\n\n".as_bytes())?;
 
     Ok(())
 }
 
-fn map_dockerfile_line(line: &str, last: bool, entry: bool) -> Option<(String, String)> {
-    let words: Vec<&str> = line.trim().split_whitespace().collect();
-    if words.is_empty() {
-        return None;
-    }
-    let head = words[0];
-    let cmd = words[1..].to_vec();
+fn generate_dockerfile_runtime(dockerfile: &mut File, script_path: &str) -> anyhow::Result<()> {
+    dockerfile.write("FROM ubuntu:24.04 AS final\n\n".as_bytes())?;
 
-    match head {
-        "ENTRYPOINT" => {
-            let entry = cmd.join(" ");
-            let re = Regex::new(r#"[\[\]'",]"#).unwrap();
-            let entry_clean = re.replace_all(entry.as_str(), "");
-            Some(("handler".to_string(), entry_clean.to_string()))
-        },
-        "CMD" => {
-            if last && !entry {
-                let entry = cmd.join(" ");
-                let re = Regex::new(r#"[\[\]'",]"#).unwrap();
-                let entry_clean = re.replace_all(entry.as_str(), "");
-                Some(("handler".to_string(), entry_clean.to_string()))
-            }
-            else {
-                None
-            }
-        }
-        _ => None
-    }
+    // Install minimal runtime dependencies
+    dockerfile.write("RUN apt-get update && apt-get install -y --no-install-recommends \\\n".as_bytes())?;
+    dockerfile.write("\tca-certificates \\\n".as_bytes())?;
+    dockerfile.write("\tcurl \\\n".as_bytes())?;
+    dockerfile.write("\tgit \\\n".as_bytes())?;
+    dockerfile.write("\t&& rm -rf /var/lib/apt/lists/*\n\n".as_bytes())?;
+
+    // Copy pixi binary and base environment from build stage
+    dockerfile.write("COPY --from=build /usr/local/bin/pixi /usr/local/bin/pixi\n".as_bytes())?;
+    dockerfile.write("COPY --from=build /pixi/.pixi/envs/default /pixi/.pixi/envs/default\n".as_bytes())?;
+    dockerfile.write("COPY --from=build --chmod=0755 /pixi/entrypoint.sh /pixi/entrypoint.sh\n".as_bytes())?;
+    dockerfile.write("COPY --from=build /pixi/pixi.toml /pixi/pixi.toml\n\n".as_bytes())?;
+    
+    // Copy user's script
+    dockerfile.write(format!("COPY {} ./\n\n", script_path).as_bytes())?;
+
+    // Set up environment variables
+    dockerfile.write("ENV PATH=\"/pixi/.pixi/envs/default/bin:${PATH}\"\n".as_bytes())?;
+    dockerfile.write("ENV GDAL_DATA=\"/pixi/.pixi/envs/default/share/gdal\"\n".as_bytes())?;
+    dockerfile.write("ENV PROJ_LIB=\"/pixi/.pixi/envs/default/share/proj\"\n\n".as_bytes())?;
+    dockerfile.write("ENV PYTHONUNBUFFERED=\"1\"\n\n".as_bytes())?;
+
+    // Set entrypoint for pixi to be used by default
+    dockerfile.write("ENTRYPOINT [\"/pixi/entrypoint.sh\"]".as_bytes())?;
+
+    Ok(())
+}
+
+pub fn generate_dockerfile(path: &PathBuf, script_path: &str) -> anyhow::Result<()> {
+    let docker_path = Path::new(path).join("Dockerfile");
+    let mut file = File::create(docker_path)?;
+    // build stage
+    generate_dockerfile_build(&mut file)?;
+    // runtime stage
+    generate_dockerfile_runtime(&mut file, script_path)?;
+    Ok(())
 }

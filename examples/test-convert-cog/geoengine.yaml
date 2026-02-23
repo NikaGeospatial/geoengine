@@ -1,0 +1,25 @@
+name: test-convert-cog
+version: "1.0.0"
+description: Convert a GeoTIFF to a Cloud-Optimized GeoTIFF (COG) using GDAL.
+
+command:
+  program: python
+  script: main.py
+  inputs:
+    - name: input-path
+      type: file
+      required: true
+      description: Path to the input GeoTIFF file
+      readonly: true
+    - name: output-path
+      type: file
+      required: true
+      description: Path for the output COG file
+      readonly: false
+
+plugins:
+  arcgis: false
+  qgis: true
+
+deploy:
+  tenant_id: null

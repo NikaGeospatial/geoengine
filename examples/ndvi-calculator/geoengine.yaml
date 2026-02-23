@@ -1,0 +1,39 @@
+name: ndvi-calculator
+version: 1.0.0
+description: Computes NDVI (Normalized Difference Vegetation Index) from multispectral satellite imagery using R.
+build:
+  base_deps: r
+  requirements_file_path: requirements.R
+command:
+  program: Rscript
+  script: main.R
+  inputs:
+  - name: input-file
+    type: file
+    required: true
+    description: Multispectral satellite GeoTIFF (e.g. Landsat 8/9, Sentinel-2)
+    readonly: true
+  - name: output-dir
+    type: folder
+    required: true
+    description: Output folder for NDVI results
+    readonly: false
+  - name: red-band
+    type: number
+    required: false
+    default: 4
+    description: Band index for red reflectance (default 4 for Landsat 8/9)
+  - name: nir-band
+    type: number
+    required: false
+    default: 5
+    description: Band index for NIR reflectance (default 5 for Landsat 8/9)
+  - name: threshold
+    type: number
+    required: false
+    description: NDVI threshold for binary vegetation mask (e.g. 0.3)
+plugins:
+  arcgis: false
+  qgis: true
+deploy:
+  tenant_id: null

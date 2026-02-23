@@ -6,16 +6,18 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::fs::File;
 use crate::config::worker::WorkerConfig;
 use crate::config::settings::Settings;
 use crate::config::state::{self, sha256_bytes, WorkerState};
 use crate::config::yaml_store;
 use crate::docker::client::DockerClient;
-use crate::docker::config::ContainerConfig;
+use crate::docker::container::ContainerConfig;
 use crate::docker::gpu::GpuConfig;
-use crate::docker::dockerfile::get_dockerfile_config;
 use crate::cli::plugins;
 use crate::cli::plugins::{verify_arcgis_plugin_installed, verify_qgis_plugin_installed};
+use crate::config::pixi::PixiConfig;
+use crate::docker::dockerfile;
 use crate::utils::versioning::{compare_versions, validate_version, get_latest_worker_version_clientless, get_latest_worker_version, compare_worker_version};
 // ---------------------------------------------------------------------------
 // JSON output structs (used by --json flags and plugin integration)
@@ -73,22 +75,12 @@ struct OutputFileInfo {
 // geoengine init
 // ---------------------------------------------------------------------------
 
-pub async fn init_worker(name: Option<&str>) -> Result<()> {
+pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
     let current_dir = std::env::current_dir()?;
     let config_path = current_dir.join("geoengine.yaml");
 
-    if config_path.exists() {
-        let replace = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("geoengine.yaml already exists in {}. Overwrite existing geoengine.yaml?", current_dir.display()))
-            .items(&["Yes", "No"])
-            .default(1)
-            .interact()?;
-
-        match replace {
-            0 => (),
-            _ => return Ok(())
-        }
-    }
+    let mut replaced_pixi = false;
+    let mut replaced_conf = false;
 
     let worker_name = name
         .map(|s| s.to_string())
@@ -100,28 +92,73 @@ pub async fn init_worker(name: Option<&str>) -> Result<()> {
                 .to_string()
         });
 
-    let mut template = WorkerConfig::template(&worker_name);
+    if config_path.exists() {
+        let replace = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("geoengine.yaml already exists in {}. Overwrite existing geoengine.yaml?", current_dir.display()))
+            .items(&["Yes", "No"])
+            .default(1)
+            .interact()?;
 
-    if let Err(e) = get_dockerfile_config(&current_dir, &mut template) {
+        replaced_conf = match replace {
+            0 => true,
+            _ => false,
+        }
+    }
+
+    if !config_path.exists() || replaced_conf {
+        let template = WorkerConfig::template(&worker_name);
+        let yaml = serde_yaml::to_string(&template)?;
+        std::fs::write(&config_path, yaml)?;
         println!(
-            "{} Dockerfile discovery skipped: {}",
-            "!".yellow().bold(),
-            e
+            "{} Created {} in {}",
+            "✓".green().bold(),
+            "geoengine.yaml".cyan(),
+            current_dir.display()
         );
     }
 
-    let yaml = serde_yaml::to_string(&template)?;
+    let pixitoml_path = current_dir.join("pixi.toml");
 
-    std::fs::write(&config_path, yaml)?;
+    if pixitoml_path.exists() {
+        let replace_pixi = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("pixi.toml already exists in {}. Overwrite existing pixi.toml?", current_dir.display()))
+            .items(&["Yes", "No"])
+            .default(1)
+            .interact()?;
 
-    println!(
-        "{} Created {} in {}",
-        "✓".green().bold(),
-        "geoengine.yaml".cyan(),
-        current_dir.display()
-    );
+        replaced_pixi = match replace_pixi {
+            0 => true,
+            _ => false
+        };
+    }
+
+    if !pixitoml_path.exists() || replaced_pixi {
+        let toml_template = match env {
+            Some("r") => PixiConfig::r_template(&worker_name),
+            None | Some("py") => PixiConfig::py_template(&worker_name),
+            _ => {
+                anyhow::bail!("Invalid --env: {}. Use either {} or {} and try again.\n{} {} {} created",
+                    env.unwrap(),
+                    "r".bold(),
+                    "py".bold(),
+                    "×".red().bold(),
+                    "pixi.toml".cyan(),
+                    "NOT".bold()
+                )
+            }
+        };
+        let pixi_toml = toml::to_string(&toml_template)?;
+        std::fs::write(&pixitoml_path, pixi_toml)?;
+        println!(
+            "{} Created {} in {}",
+            "✓".green().bold(),
+            "pixi.toml".cyan(),
+            current_dir.display()
+        );
+    }
+
     println!("\nNext steps:");
-    println!("  1. Edit geoengine.yaml to configure your worker");
+    println!("  1. Edit geoengine.yaml an pixi.toml to configure your worker");
     println!("  2. Run {} to register and build", "geoengine apply".cyan());
 
     Ok(())
@@ -131,19 +168,19 @@ pub async fn init_worker(name: Option<&str>) -> Result<()> {
 // geoengine build
 // ---------------------------------------------------------------------------
 
-pub async fn build_worker_local(no_cache: bool, dev: bool, build_args: &[String]) -> Result<()> {
+pub async fn build_worker_local(no_cache: bool, dev: bool, build_args: &[String], verbose: bool) -> Result<()> {
     let (worker_name, _) = resolve_worker_from_cwd();
-    build_worker(&worker_name, no_cache, dev, build_args).await
+    build_worker(&worker_name, no_cache, dev, build_args, verbose).await
 }
 
-pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &[String]) -> Result<()> {
+pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &[String], verbose: bool) -> Result<()> {
     let settings = Settings::load()?;
     let worker_path = settings.get_worker_path(worker)?;
     let config = yaml_store::load_saved_config(worker)?;
 
     let client = DockerClient::new().await?;
 
-    let new_version = config.version.clone().unwrap_or("".to_string());
+    let new_version = config.version.clone();
 
     // --- Version validation ---
     let ver_cmp = compare_worker_version(worker, &new_version, &client).await;
@@ -278,7 +315,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
     ;
 
     // Parse build args from CLI only
-    let mut args: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut args: HashMap<String, String> = HashMap::new();
     for arg in build_args {
         let parts: Vec<&str> = arg.splitn(2, '=').collect();
         if parts.len() == 2 {
@@ -286,19 +323,26 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         }
     }
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")?,
-    );
-    pb.set_message("Building image...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    let pb = if verbose {
+        None
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")?,
+        );
+        pb.set_message("Building image...");
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        Some(pb)
+    };
 
     client
-        .build_image(&dockerfile, &context, &image_tag, &args, no_cache)
+        .build_image(&dockerfile, &context, &image_tag, &args, no_cache, verbose)
         .await?;
 
-    pb.finish_and_clear();
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
     println!(
         "{} Successfully built image: {}",
         "✓".green().bold(),
@@ -329,7 +373,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
 // ---------------------------------------------------------------------------
 
 pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
-    // 1. Resolve the worker
+    // Resolve the worker
     let (worker_name, worker_path) = if let Some(name) = worker {
         let settings = Settings::load()?;
         match settings.get_worker_path(name) {
@@ -408,16 +452,16 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         }
     };
 
-    // 2. Load current config from YAML and detect changes from saved state. If changed, save it, if not exit.
+    // Load current config from YAML and detect changes from saved state. If changed, save it, if not exit.
     let config_changed = yaml_store::check_changed_config(&worker_name, &worker_path)?;
-    if !config_changed {
+    if !config_changed && worker_path.clone().join("Dockerfile").exists() {
         println!("{} No changes detected in geoengine.yaml of worker '{}'. Nothing to apply.", "!".yellow().bold(), worker_name);
         return Ok(());
     }
     let config = WorkerConfig::load(&worker_path.join("geoengine.yaml"))?;
     yaml_store::save_config(&config)?;
 
-    // 3. Auto-register if not already registered
+    // Auto-register if not already registered
     let mut settings = Settings::load()?;
     if settings.workers.get(&worker_name).is_none() {
         let canonical = worker_path.canonicalize().unwrap_or_else(|_| worker_path.clone());
@@ -431,16 +475,31 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         );
     } else {
         println!(
-            "{} Worker '{}' is already registered",
+            "{} Worker '{}' is already registered. Updated geoengine.yaml saved.",
             "✓".green().bold(),
             worker_name.cyan()
         );
     }
 
-    // 4. Load previous state for plugin comparison
+    // Load previous state for plugin comparison
     let prev_state = state::load_state(&worker_name)?;
 
-    // 5. Detect and apply plugin changes
+    // Generate the Dockerfile if not already done so
+    if !worker_path.clone().join("Dockerfile").exists()
+    {
+        if config.command.is_some() {
+            dockerfile::generate_dockerfile(&worker_path, config.command.clone().unwrap().script.as_ref())?;
+            println!(
+                "{} Dockerfile generated.",
+                "✓".green().bold(),
+            );
+        }
+        else {
+            anyhow::bail!("No command specified in geoengine.yaml of worker '{}'. Cannot generate Dockerfile.", worker_name);
+        }
+    }
+
+    // Detect and apply plugin changes
     let cur_arcgis = config.plugins.as_ref().and_then(|p| p.arcgis).unwrap_or(false);
     let cur_qgis = config.plugins.as_ref().and_then(|p| p.qgis).unwrap_or(false);
     let prev_arcgis = prev_state.as_ref().and_then(|s| s.plugins_arcgis).unwrap_or(false);
@@ -510,7 +569,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         } else if cur_arcgis && verify_arcgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
-                format!("Tool {} from ArcGIS plugin.", "registered".green())
+                format!("Tool {} in ArcGIS plugin.", "registered".green())
             ));
         } else if !cur_arcgis && verify_arcgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
@@ -574,7 +633,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         } else if cur_qgis && verify_qgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
-                format!("Tool {} from QGIS plugin.", "registered".green())
+                format!("Tool {} in QGIS plugin.", "registered".green())
             ));
         } else if !cur_qgis && verify_qgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
@@ -593,7 +652,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         println!("{} No plugin changes detected", "✓".green().bold());
     }
 
-    // 5b. If plugin flags were reverted, persist to disk and update saved config
+    // If plugin flags were reverted, persist to disk and update saved config
     let config = if yaml_dirty {
         std::fs::write(&yaml_path, &yaml_content)
             .with_context(|| format!("Failed to write reverted YAML to {}", yaml_path.display()))?;
@@ -604,7 +663,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         config
     };
 
-    // 6. Recompute YAML hashes from current files; preserve build hashes from previous state.
+    // Recompute YAML hashes from current files; preserve build hashes from previous state.
     //    yaml_hash: full YAML file hash (used by `apply` change detection)
     //    yaml_build_hash: hash of build-relevant fields only (used by `build`)
     //    dockerfile_hash: preserved from previous state (used by `build`)
@@ -712,7 +771,7 @@ pub async fn run_worker(
     let config = yaml_store::load_saved_config(&worker_name)?;
 
     // Update if version changed
-    let this_ver = config.version.unwrap_or("latest".to_string());
+    let this_ver = config.version;
 
 
     // Get command config
@@ -734,7 +793,7 @@ pub async fn run_worker(
     // Build extra mounts from input values that are explicitly defined as
     // file/folder inputs in worker config.
     let mut extra_mounts: Vec<(String, String, bool)> = Vec::new();
-    let input_definitions: HashMap<String, (String, bool)> = cmd_config
+    let input_definitions: HashMap<String, (String, bool, bool)> = cmd_config
         .inputs
         .as_ref()
         .map(|defs| {
@@ -742,7 +801,7 @@ pub async fn run_worker(
                 .map(|d| {
                     (
                         d.name.clone(),
-                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true)),
+                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true), d.required.unwrap_or(false)),
                     )
                 })
                 .collect()
@@ -752,24 +811,44 @@ pub async fn run_worker(
     // Build script arguments from inputs
     let mut script_args: Vec<String> = Vec::new();
     for (key, value) in &inputs {
+        let path = Path::new(match value.as_ref() {
+            "NULL" => "",
+            _ => value,
+        });
         // Only auto-mount for declared file/folder inputs.
-        let path = Path::new(value);
-        let processed_value = if let Some((param_type, readonly)) = input_definitions.get(key) {
+        let processed_value = if let Some((param_type, readonly, required)) = input_definitions.get(key) {
             match param_type.as_str() {
                 "file" => {
-                    if !path.exists() {
-                        anyhow::bail!(
-                            "Input '{}' is declared as type 'file' but path does not exist: {}",
-                            key,
-                            value
-                        );
-                    }
-                    if !path.is_file() {
+                    // Check if path given is empty, and enforce if it is a required input.
+                    // If path given is not empty, check if it indeed is a file (could be a directory).
+                    // If path given is not empty and is a file, check if it exists and enforce existence if it is readonly, else just create it.
+                    if path.as_os_str().is_empty() {
+                        // If this parameter is not required, it can be empty
+                        match required {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared required but received an empty path: {}",
+                                key,
+                                value
+                            ),
+                            false => {
+                                continue
+                            },
+                        }
+                    } else if !path.is_file() {
                         anyhow::bail!(
                             "Input '{}' is declared as type 'file' but received a non-file path: {}",
                             key,
                             value
                         );
+                    } else if !path.exists() {
+                        match readonly {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared as readonly but received a non-existent path: {}",
+                                key,
+                                value
+                            ),
+                            false => File::create(path)?,
+                        };
                     }
 
                     let filename = path.file_name().ok_or_else(|| {
@@ -791,19 +870,36 @@ pub async fn run_worker(
                     container_path
                 }
                 "folder" => {
-                    if !path.exists() {
-                        anyhow::bail!(
-                            "Input '{}' is declared as type 'folder' but path does not exist: {}",
-                            key,
-                            value
-                        );
-                    }
-                    if !path.is_dir() {
+                    // Check if path given is empty, and enforce if it is a required input.
+                    // If path given is not empty, check if it indeed is a directory (could be a file).
+                    // If path given is not empty and is a directory, check if it exists and enforce existence if it is readonly, else just create it.
+                    if path.as_os_str().is_empty() {
+                        // If this parameter is not required, it can be empty
+                        match required {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared required but received an empty path: {}",
+                                key,
+                                value
+                            ),
+                            false => {
+                                continue
+                            },
+                        }
+                    } else if !path.is_dir() {
                         anyhow::bail!(
                             "Input '{}' is declared as type 'folder' but received a non-directory path: {}",
                             key,
                             value
                         );
+                    } else if !path.exists() {
+                        match readonly {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared as readonly but received a non-existent path: {}",
+                                key,
+                                value
+                            ),
+                            false => std::fs::create_dir_all(path)?,
+                        };
                     }
 
                     let abs_path = path
@@ -963,7 +1059,7 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
     let desc = WorkerDescription {
         name: config.name.clone(),
         description: config.description.clone(),
-        version: config.version.clone(),
+        version: Some(config.version.clone()),
         version_built,
         inputs,
     };
@@ -1009,7 +1105,7 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
                     }
                 }
                 else {
-                    let version_cmp = compare_versions(&config.version.clone().unwrap(), built_ver.clone().unwrap().as_ref());
+                    let version_cmp = compare_versions(&config.version.clone(), built_ver.clone().unwrap().as_ref());
                     match version_cmp {
                         Ok(order) => match order {
                             Ordering::Equal => {

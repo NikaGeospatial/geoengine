@@ -34,6 +34,10 @@ enum Commands {
         /// Worker name, if not specified, uses current directory name.
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Environment of the project, either "py" or "r". Defaults to "py".
+        #[arg(short, long)]
+        env: Option<String>,
     },
 
     /// Build the Docker image for a worker
@@ -130,16 +134,18 @@ enum Commands {
 
 impl Cli {
     pub async fn execute(self) -> Result<()> {
+        let verbose = self.verbose;
+
         match self.command {
             Commands::Image { command } => command.execute().await,
-            Commands::Init { name } => {
-                worker::init_worker(name.as_deref()).await
+            Commands::Init { name, env } => {
+                worker::init_worker(name.as_deref(), env.as_deref()).await
             }
             Commands::Build {
                 no_cache,
                 dev,
                 build_arg,
-            } => worker::build_worker_local(no_cache, dev, &build_arg).await,
+            } => worker::build_worker_local(no_cache, dev, &build_arg, verbose).await,
             Commands::Apply { worker } => {
                 worker::apply_worker(worker.as_deref(), false).await
             }
