@@ -45,6 +45,10 @@ fn generate_dockerfile_runtime(dockerfile: &mut File) -> anyhow::Result<()> {
     dockerfile.write_all(b"WORKDIR /app\n\n")?;
     dockerfile.write_all(b"COPY . /app\n\n")?;
 
+    // Create user and set working directory permissions
+    dockerfile.write_all(b"RUN useradd -m worker && chown -R worker:worker /app\n")?;
+    dockerfile.write_all(b"USER worker\n\n")?;
+
     // Set up environment variables
     dockerfile.write_all(b"ENV PATH=\"/pixi/.pixi/envs/default/bin:${PATH}\"\n")?;
     dockerfile.write_all(b"ENV GDAL_DATA=\"/pixi/.pixi/envs/default/share/gdal\"\n")?;
@@ -60,7 +64,6 @@ fn generate_dockerfile_runtime(dockerfile: &mut File) -> anyhow::Result<()> {
 /// Ignored files when building docker image
 fn generate_dockerignore(ignorefile: &mut File) -> anyhow::Result<()> {
     ignorefile.write_all(b"geoengine.yaml\n")?;
-    ignorefile.write_all(b"pixi.toml\n")?;
     ignorefile.write_all(b"Dockerfile\n")?;
     ignorefile.write_all(b".venv\n")?;
     ignorefile.write_all(b".idea\n")?;

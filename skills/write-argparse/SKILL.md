@@ -5,7 +5,7 @@ description: Adding CLI argument parsing to a user's script so that GeoEngine ca
 
 ## 1. When This Skill Runs
 
-```
+```text
  User script (main.py / main.R)
          |
          v
@@ -250,7 +250,7 @@ verbose <- tolower(args$verbose) %in% c("true", "1", "yes")
 Function parameter names use **underscores** (snake_case). CLI flags use
 **hyphens** (kebab-case). The conversion is:
 
-```
+```text
 Function param    CLI flag         Python attr       R dest
 --------------    -----------      -----------       ------
 input_dir     --> --input-dir  --> args.input_dir    args$input_dir
@@ -503,7 +503,7 @@ if (is.null(args$input_dir)) {
 
 ## 10. Procedure (Step-by-Step)
 
-```
+```text
  START
    |
    v

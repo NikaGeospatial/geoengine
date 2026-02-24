@@ -8,7 +8,7 @@ description: Editing a `geoengine.yaml` configuration file for a GeoEngine worke
 GeoEngine runs user scripts inside Docker containers. The `geoengine.yaml`
 file is the single source of truth that tells GeoEngine:
 
-```
+```text
  geoengine.yaml
  +-----------+------------------------------------------+
  | name      | Worker identity (kebab-case)              |
@@ -85,7 +85,7 @@ deploy:
 - Set `readonly: false` for **output** directories/files the script writes to.
 - Read-only mounts prevent the script from accidentally modifying input data.
 
-```
+```text
  Decision tree for readonly:
 
    Is this input something the script READS from?
@@ -117,7 +117,7 @@ Required **only** when `type: enum`. Lists the allowed string values:
 
 ## 4. Step-by-Step Procedure
 
-```
+```text
  START
    |
    v
@@ -242,7 +242,7 @@ Look at the argument name and how it is used in the script:
 container. These are for persistent data paths lying OUTSIDE the worker's
 directory that are NOT passed as `--input` flags.
 
-```
+```text
  Do I need a local_dir_mount?
 
    Is this directory passed as a file/folder input parameter?

@@ -29,6 +29,9 @@ WORKDIR /app
 
 COPY . /app
 
+RUN useradd -m worker && chown -R worker:worker /app
+USER worker
+
 ENV PATH="/pixi/.pixi/envs/default/bin:${PATH}"
 ENV GDAL_DATA="/pixi/.pixi/envs/default/share/gdal"
 ENV PROJ_LIB="/pixi/.pixi/envs/default/share/proj"

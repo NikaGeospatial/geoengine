@@ -460,7 +460,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         return Ok(());
     }
     let config = WorkerConfig::load(&worker_path.join("geoengine.yaml"))?;
-    verify_worker_config_path_types(&config)?;
+    verify_worker_config_path_types(&config, &worker_path)?;
     yaml_store::save_config(&config)?;
 
     // Auto-register if not already registered
@@ -687,6 +687,12 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         None => None,
     };
 
+    let script = Some(config
+        .command
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No command specified in geoengine.yaml of worker '{}'", worker_name))?
+        .script
+        .clone());
     let new_state = WorkerState {
         worker_name: worker_name.clone(),
         applied_at: chrono::Utc::now().to_rfc3339(),
@@ -696,7 +702,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         command_hash,
         pushed_build_hash,
         image_tag,
-        script: Some(config.command.unwrap().script),
+        script,
         plugins_arcgis: Some(res_arcgis),
         plugins_qgis: Some(res_qgis),
     };
@@ -804,7 +810,7 @@ pub async fn run_worker(
                 .map(|d| {
                     (
                         d.name.clone(),
-                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true), d.required.unwrap_or(false)),
+                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true), d.required.unwrap_or(true)),
                     )
                 })
                 .collect()
@@ -1647,11 +1653,16 @@ fn shell_escape(s: &str) -> String {
 ///
 /// Note: relative paths are resolved against the current process working directory.
 /// If you later need per-worker relative resolution, this should take worker base paths too.
-fn verify_worker_config_path_types(config: &WorkerConfig) -> Result<()> {
+fn verify_worker_config_path_types(config: &WorkerConfig, worker_path: &Path) -> Result<()> {
     let mut errors = Vec::new();
 
     if let Some(command) = &config.command {
         let script_path = Path::new(&command.script);
+        let script_path = if script_path.is_absolute() {
+            script_path.to_path_buf()
+        } else {
+            worker_path.join(script_path)
+        };
 
         if !script_path.exists() {
             errors.push(format!(
@@ -1671,6 +1682,11 @@ fn verify_worker_config_path_types(config: &WorkerConfig) -> Result<()> {
     if let Some(mounts) = &config.local_dir_mounts {
         for (idx, mount) in mounts.iter().enumerate() {
             let host_path = Path::new(&mount.host_path);
+            let host_path = if host_path.is_absolute() {
+                host_path.to_path_buf()
+            } else {
+                worker_path.join(host_path)
+            };
 
             if !host_path.exists() {
                 errors.push(format!(

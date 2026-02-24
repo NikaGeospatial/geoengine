@@ -13,7 +13,7 @@ Pixi is a conda-based package manager. The `pixi.toml` file declares:
 - **PyPI dependencies** under `[pypi-dependencies]` (Python-only packages
   not available on conda-forge)
 
-```
+```text
  pixi.toml structure
  +---------------------+
  | [workspace]         |  <-- name, version, channels, platforms
@@ -70,7 +70,7 @@ These values should **always** be set exactly as shown:
 
 ## 3. Step-by-Step Procedure
 
-```
+```text
  START
    |
    v
@@ -179,7 +179,7 @@ base packages. Add only what the R script needs.
 
 Read `requirements.txt` line by line. Each line is a package specifier:
 
-```
+```text
 pillow>=12.1.1
 rasterio>=1.3.11
 numpy>=1.26.4
@@ -188,7 +188,7 @@ scikit-learn
 
 ### Conversion rules
 
-```
+```text
  For each line in requirements.txt:
    |
    v
@@ -286,7 +286,7 @@ require(sf)          # --> r-sf
 
 **Skip base R packages** (no pixi entry needed):
 
-```
+```text
 base, utils, stats, graphics, grDevices, datasets, methods, tools, parallel
 ```
 
@@ -298,7 +298,7 @@ add `r-foo = "*"` to `[dependencies]` (lowercased, hyphen-prefixed), never to
 
 ## 8. Conda vs PyPI Decision Tree (Python Only)
 
-```
+```text
  Should this Python package go in [dependencies] or [pypi-dependencies]?
    |
    v
@@ -331,7 +331,7 @@ add `r-foo = "*"` to `[dependencies]` (lowercased, hyphen-prefixed), never to
 
 These have C/system library dependencies that conda handles:
 
-```
+```text
 gdal, rasterio, fiona, shapely, pyproj, geopandas, numpy, scipy,
 pandas, netcdf4, h5py, zarr, xarray, opencv, pytorch, tensorflow,
 scikit-learn, scikit-image, matplotlib, cartopy, basemap
@@ -341,7 +341,7 @@ scikit-learn, scikit-image, matplotlib, cartopy, basemap
 
 Pure-Python packages or packages not on conda-forge:
 
-```
+```text
 pillow, flask, fastapi, pydantic, httpx, click,
 rich, typer, loguru, tqdm (also on conda, but fine either way)
 ```
@@ -358,7 +358,7 @@ conda packages. This is the safer default.
 ### Example A: Python converter
 
 **requirements.txt:**
-```
+```text
 pillow>=12.1.1
 rasterio>=1.3.11
 numpy>=1.26.4
@@ -398,7 +398,6 @@ pyproj = ">=3.6,<4"
 rasterio = "*"
 
 [pypi-dependencies]
-argparse = "*"
 pillow = "*"
 ```
 
@@ -459,7 +458,7 @@ r-optparse = "*"
 ### Example D: Python ML worker (extra deps)
 
 **requirements.txt:**
-```
+```text
 torch>=2.0
 torchvision
 pillow
