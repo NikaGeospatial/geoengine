@@ -25,7 +25,9 @@ COPY --from=build /pixi/.pixi/envs/default /pixi/.pixi/envs/default
 COPY --from=build --chmod=0755 /pixi/entrypoint.sh /pixi/entrypoint.sh
 COPY --from=build /pixi/pixi.toml /pixi/pixi.toml
 
-COPY main.py ./
+WORKDIR /app
+
+COPY . /app
 
 ENV PATH="/pixi/.pixi/envs/default/bin:${PATH}"
 ENV GDAL_DATA="/pixi/.pixi/envs/default/share/gdal"

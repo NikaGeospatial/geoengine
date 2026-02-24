@@ -239,8 +239,8 @@ Look at the argument name and how it is used in the script:
 ## 6. Local Directory Mounts
 
 `local_dir_mounts` declares **extra** host directories to attach to the
-container. These are for persistent data paths that are NOT passed as
-`--input` flags.
+container. These are for persistent data paths lying OUTSIDE the worker's
+directory that are NOT passed as `--input` flags.
 
 ```
  Do I need a local_dir_mount?
@@ -250,8 +250,9 @@ container. These are for persistent data paths that are NOT passed as
      +-- YES --> Do NOT add it to local_dir_mounts.
      |           GeoEngine auto-mounts file/folder inputs.
      |
-     +-- NO, it's a fixed data directory the script always needs
-              (e.g., model weights, reference data, shared cache)
+     +-- NO, it's a fixed data directory outside the worker directory that
+         the script always needs.
+         (e.g., model weights, reference data, shared cache)
               |
               v
               Add it to local_dir_mounts.

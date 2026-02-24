@@ -128,9 +128,7 @@ class GeoEngineCLIClient:
 
         for key, value in inputs.items():
             if value is not None:
-                str_value = str(value)
-                if str_value:
-                    cmd.extend(['--input', f'{key}={str_value}'])
+                cmd.extend(['--input', f'{key}={value}'])
 
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True

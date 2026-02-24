@@ -25,7 +25,7 @@ fn generate_dockerfile_build(dockerfile: &mut File) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn generate_dockerfile_runtime(dockerfile: &mut File, script_path: &str) -> anyhow::Result<()> {
+fn generate_dockerfile_runtime(dockerfile: &mut File) -> anyhow::Result<()> {
     dockerfile.write_all(b"FROM ubuntu:24.04 AS final\n\n")?;
 
     // Install minimal runtime dependencies
@@ -41,8 +41,9 @@ fn generate_dockerfile_runtime(dockerfile: &mut File, script_path: &str) -> anyh
     dockerfile.write_all(b"COPY --from=build --chmod=0755 /pixi/entrypoint.sh /pixi/entrypoint.sh\n")?;
     dockerfile.write_all(b"COPY --from=build /pixi/pixi.toml /pixi/pixi.toml\n\n")?;
     
-    // Copy user's script
-    dockerfile.write_all(format!("COPY {} ./{}\n\n", script_path, script_path).as_bytes())?;
+    // Copy project tree into isolated folder in container, set its working directory
+    dockerfile.write_all(b"WORKDIR /app\n\n")?;
+    dockerfile.write_all(b"COPY . /app\n\n")?;
 
     // Set up environment variables
     dockerfile.write_all(b"ENV PATH=\"/pixi/.pixi/envs/default/bin:${PATH}\"\n")?;
@@ -56,16 +57,25 @@ fn generate_dockerfile_runtime(dockerfile: &mut File, script_path: &str) -> anyh
     Ok(())
 }
 
-pub fn generate_dockerfile(path: &PathBuf, script_path: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !script_path.contains('\n') && !script_path.is_empty(),
-        "script_path must be a single non-empty path"
-    );
+/// Ignored files when building docker image
+fn generate_dockerignore(ignorefile: &mut File) -> anyhow::Result<()> {
+    ignorefile.write_all(b"geoengine.yaml\n")?;
+    ignorefile.write_all(b"pixi.toml\n")?;
+    ignorefile.write_all(b"Dockerfile\n")?;
+    ignorefile.write_all(b".venv\n")?;
+    ignorefile.write_all(b".idea\n")?;
+    Ok(())
+}
+
+pub fn generate_dockerfile(path: &PathBuf) -> anyhow::Result<()> {
     let docker_path = Path::new(path).join("Dockerfile");
-    let mut file = File::create(docker_path)?;
+    let mut dockerfile = File::create(docker_path)?;
     // build stage
-    generate_dockerfile_build(&mut file)?;
+    generate_dockerfile_build(&mut dockerfile)?;
     // runtime stage
-    generate_dockerfile_runtime(&mut file, script_path)?;
+    generate_dockerfile_runtime(&mut dockerfile)?;
+
+    let mut ignorefile = File::create(path.join(".dockerignore"))?;
+    generate_dockerignore(&mut ignorefile)?;
     Ok(())
 }

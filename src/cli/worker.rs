@@ -360,6 +360,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         command_hash,
         pushed_build_hash,
         image_tag: Some(image_tag),
+        script: prev_state.as_ref().and_then(|s| s.script.clone()),
         plugins_arcgis: prev_state.as_ref().and_then(|s| s.plugins_arcgis),
         plugins_qgis: prev_state.as_ref().and_then(|s| s.plugins_qgis),
     };
@@ -459,6 +460,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         return Ok(());
     }
     let config = WorkerConfig::load(&worker_path.join("geoengine.yaml"))?;
+    verify_worker_config_path_types(&config)?;
     yaml_store::save_config(&config)?;
 
     // Auto-register if not already registered
@@ -488,7 +490,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
     if !worker_path.clone().join("Dockerfile").exists()
     {
         if config.command.is_some() {
-            dockerfile::generate_dockerfile(&worker_path, config.command.clone().unwrap().script.as_ref())?;
+            dockerfile::generate_dockerfile(&worker_path)?;
             println!(
                 "{} Dockerfile generated.",
                 "✓".green().bold(),
@@ -694,6 +696,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         command_hash,
         pushed_build_hash,
         image_tag,
+        script: Some(config.command.unwrap().script),
         plugins_arcgis: Some(res_arcgis),
         plugins_qgis: Some(res_qgis),
     };
@@ -816,6 +819,7 @@ pub async fn run_worker(
             _ => value,
         });
         // Only auto-mount for declared file/folder inputs.
+        // Ignore optional fields left blank.
         let processed_value = if let Some((param_type, readonly, required)) = input_definitions.get(key) {
             match param_type.as_str() {
                 "file" => {
@@ -913,7 +917,21 @@ pub async fn run_worker(
                     ));
                     container_path
                 }
-                _ => value.clone(),
+                _ => {
+                    if value.is_empty() {
+                        match required {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared required but received an empty value: {}",
+                                key,
+                                value
+                            ),
+                            false => {
+                                continue
+                            },
+                        }
+                    }
+                    value.clone()
+                },
             }
         } else {
             value.clone()
@@ -1618,5 +1636,63 @@ fn shell_escape(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
     } else {
         s.to_string()
+    }
+}
+
+/// Verifies path-typed `geoengine.yaml` entries for a worker.
+///
+/// For now this checks:
+/// - `command.script` exists and is a file
+/// - each `local_dir_mounts[*].host_path` exists and is a directory
+///
+/// Note: relative paths are resolved against the current process working directory.
+/// If you later need per-worker relative resolution, this should take worker base paths too.
+fn verify_worker_config_path_types(config: &WorkerConfig) -> Result<()> {
+    let mut errors = Vec::new();
+
+    if let Some(command) = &config.command {
+        let script_path = Path::new(&command.script);
+
+        if !script_path.exists() {
+            errors.push(format!(
+                "Worker '{}': command.script does not exist: {}",
+                config.name,
+                script_path.display()
+            ));
+        } else if !script_path.is_file() {
+            errors.push(format!(
+                "Worker '{}': command.script is not a file: {}",
+                config.name,
+                script_path.display()
+            ));
+        }
+    }
+
+    if let Some(mounts) = &config.local_dir_mounts {
+        for (idx, mount) in mounts.iter().enumerate() {
+            let host_path = Path::new(&mount.host_path);
+
+            if !host_path.exists() {
+                errors.push(format!(
+                    "Worker '{}': local_dir_mounts[{}].host_path does not exist: {}",
+                    config.name,
+                    idx,
+                    host_path.display()
+                ));
+            } else if !host_path.is_dir() {
+                errors.push(format!(
+                    "Worker '{}': local_dir_mounts[{}].host_path is not a directory: {}",
+                    config.name,
+                    idx,
+                    host_path.display()
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("geoengine.yaml path validation failed:\n{}", errors.join("\n"))
     }
 }
