@@ -35,11 +35,11 @@ calculate_ndvi <- function(input_file, output_dir, red_band, nir_band,
   nbands <- terra::nlyr(raster)
   cat(sprintf("  Bands found: %d\n", nbands))
 
-  if (red_band > nbands || nir_band > nbands) {
+  if (red_band < 1 || nir_band < 1 || red_band > nbands || nir_band > nbands) {
     stop(sprintf(
       "Raster has %d bands but requested red=%d, nir=%d. %s",
       nbands, red_band, nir_band,
-      "Check your --red-band and --nir-band values."
+      "Check your --red-band and --nir-band values (must be >= 1 and <= number of bands)."
     ), call. = FALSE)
   }
 

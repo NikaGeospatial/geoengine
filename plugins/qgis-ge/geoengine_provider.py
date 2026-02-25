@@ -511,14 +511,17 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         out_path = os.path.join(temp_dir, f"{self._safe_temp_stem(input_name)}.gpkg")
         feedback.pushInfo(f"Exporting non-file-backed vector input '{input_name}' to temp file...")
 
-        result = QgsVectorFileWriter.writeAsVectorFormat(
-            layer,
-            out_path,
-            "UTF-8",
-            layer.crs(),
-            "GPKG",
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = "GPKG"
+        options.fileEncoding = "UTF-8"
+        result = QgsVectorFileWriter.writeAsVectorFormatV3(
+                layer,
+                out_path,
+                QgsProject.instance().transformContext(),
+                options,
         )
         err_code = result[0] if isinstance(result, tuple) else result
+
         if err_code != QgsVectorFileWriter.NoError:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise Exception(f"Failed to export vector input '{input_name}' to temporary GeoPackage")

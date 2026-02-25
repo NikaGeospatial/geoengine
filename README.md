@@ -437,7 +437,7 @@ In order to use AI Agents, refer to the respective sections below.
 ### Activating Skills
 To activate a skill, copy the contents of the `/skills` folder into the respective skills folder of the agent:
 - Claude: `~/.claude/skills`
-- Codex: `~/.agents/skills`
+- Codex: `~/.codex/skills`
 
 ### Using Skills
 After copying the folder, the skills should be made available to the agent. Allow the agent access to the directory that

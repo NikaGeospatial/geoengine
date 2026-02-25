@@ -1012,7 +1012,14 @@ pub async fn run_worker(
                                 key,
                                 value
                             ),
-                            false => File::create(path)?,
+                            false => {
+                                if let Some(parent) = path.parent() {
+                                    if !parent.as_os_str().is_empty() {
+                                        fs::create_dir_all(parent)?;
+                                    }
+                                }
+                                File::create(path)?;
+                            },
                         };
                     } else if !path.is_file() {
                         anyhow::bail!(
@@ -1874,8 +1881,8 @@ fn shell_escape(s: &str) -> String {
 /// - `command.script` exists and is a file
 /// - each `local_dir_mounts[*].host_path` exists and is a directory
 ///
-/// Note: relative paths are resolved against the current process working directory.
-/// If you later need per-worker relative resolution, this should take worker base paths too.
+/// Note: relative paths are resolved against the provided `worker_path`.
+/// If path resolution rules change, keep this function and its call sites aligned.
 fn verify_worker_config_path_types(config: &WorkerConfig, worker_path: &Path) -> Result<()> {
     let mut errors = Vec::new();
 

@@ -10,15 +10,15 @@ file is the single source of truth that tells GeoEngine:
 
 ```text
  geoengine.yaml
- +-----------+------------------------------------------+
- | name      | Worker identity (kebab-case)              |
- | version   | Semantic version                         |
- | build     | Base environment + requirements file     |
- | command   | What program/script to run + its inputs  |
- | mounts    | Extra host directories to attach         |
- | plugins   | GIS plugin registrations                 |
- | deploy    | Cloud deployment config                  |
- +-----------+------------------------------------------+
+ +------------------+------------------------------------------+
+ | name             | Worker identity (kebab-case)             |
+ | version          | Semantic version                         |
+ | build            | Base environment + requirements file     |
+ | command          | What program/script to run + its inputs  |
+ | local_dir_mounts | Extra host directories to attach         |
+ | plugins          | GIS plugin registrations                 |
+ | deploy           | Cloud deployment config                  |
+ +------------------+------------------------------------------+
 ```
 
 At runtime, `geoengine run` reads this file, translates each declared input
@@ -440,8 +440,6 @@ After writing the YAML, verify every item:
 - [ ] `readonly: false` is set for every output directory/file
 - [ ] `readonly: true` (or omitted) for every input-only directory/file
 - [ ] `local_dir_mounts` does NOT duplicate auto-mounted input parameters
-- [ ] `build.base_deps` matches the language (`python` or `r`)
-- [ ] `build.requirements_file_path` points to the correct file (if it exists)
 - [ ] `plugins` section is present (both default to false)
 - [ ] `deploy.tenant_id` is set to null unless a tenant ID is known
 

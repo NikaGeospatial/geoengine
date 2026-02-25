@@ -266,7 +266,7 @@ import torch                    # --> pytorch (conda) or torch (pypi)
 
 **Skip standard library modules** (no pixi entry needed):
 
-```
+```text
 os, sys, pathlib, json, csv, re, math, datetime, collections,
 itertools, functools, typing, abc, io, logging, argparse,
 subprocess, shutil, tempfile, glob, uuid, hashlib, copy,
@@ -542,16 +542,16 @@ After writing pixi.toml, verify every item:
 
 ## 12. Common Mistakes to Avoid
 
-| Mistake                                          | Fix                                              |
-|--------------------------------------------------|--------------------------------------------------|
-| Putting `pillow` in `[dependencies]`             | Use `[pypi-dependencies]` (pure Python)          |
-| Putting `r-terra` in `[pypi-dependencies]`       | R packages always go in `[dependencies]`         |
-| Using `terra` instead of `r-terra` for R         | Always add `r-` prefix for R packages            |
-| Adding `os`, `sys`, `pathlib` as dependencies    | These are Python stdlib, skip them               |
-| Adding `base`, `utils`, `stats` for R            | These are base R, skip them                      |
-| Missing `pip = "*"` in Python projects           | Required for PyPI dependency installation         |
-| Using `torch` instead of `pytorch` in conda      | The conda package name is `pytorch`              |
-| Using `PIL` instead of `pillow`                  | The package name is `pillow`, not `PIL`           |
-| Forgetting `r-optparse` after write-argparse     | write-argparse adds optparse; include it here    |
+| Mistake                                          | Fix                                                   |
+|--------------------------------------------------|-------------------------------------------------------|
+| Putting `pillow` in `[dependencies]`             | Use `[pypi-dependencies]` (pure Python)               |
+| Putting `r-terra` in `[pypi-dependencies]`       | R packages always go in `[dependencies]`              |
+| Using `terra` instead of `r-terra` for R         | Always add `r-` prefix for R packages                 |
+| Adding `os`, `sys`, `pathlib` as dependencies    | These are Python stdlib, skip them                    |
+| Adding `base`, `utils`, `stats` for R            | These are base R, skip them                           |
+| Missing `pip = "*"` in Python projects           | Required for PyPI dependency installation             |
+| Using `torch` instead of `pytorch` in conda      | The conda package name is `pytorch`                   |
+| Using `PIL` instead of `pillow`                  | The package name is `pillow`, not `PIL`               |
+| Forgetting `r-optparse` after write-argparse     | write-argparse adds optparse; include it here         |
 | Setting platforms to `["osx-arm64"]`             | Docker targets are always `linux-64`, `linux-aarch64` |
-| Omitting base geospatial deps for Python         | Always include the full 18-package base template |
+| Omitting base geospatial deps for Python         | Always include the full 12-package base template      |

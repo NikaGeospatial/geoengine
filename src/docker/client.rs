@@ -3,6 +3,7 @@ use bollard::container::{Config, CreateContainerOptions, LogsOptions, StartConta
 use bollard::image::{BuildImageOptions, BuilderVersion, CreateImageOptions, ImportImageOptions, TagImageOptions};
 use bollard::Docker;
 use futures::StreamExt;
+#[cfg(unix)]
 use libc;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -501,9 +502,16 @@ impl DockerClient {
             }
         }
 
-        // Inject host UID:GID so the container process owns its bind-mounted directories
-        let uid = unsafe { libc::getuid() };
-        let gid = unsafe { libc::getgid() };
+        // Inject host UID:GID on Unix so the container process owns its bind-mounted directories
+        #[cfg(unix)]
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        #[cfg(not(unix))]
+        let (uid, gid) = (0, 0);
+
+        #[cfg(unix)]
+        let user = Some(format!("{}:{}", uid, gid));
+        #[cfg(not(unix))]
+        let user: Option<String> = None;
 
         let container_config = Config {
             image: Some(config.image.clone()),
@@ -514,7 +522,7 @@ impl DockerClient {
             attach_stdin: Some(!config.detach),
             attach_stdout: Some(!config.detach),
             attach_stderr: Some(!config.detach),
-            user: Some(format!("{}:{}", uid, gid)),
+            user,
             host_config: Some(host_config),
             ..Default::default()
         };
