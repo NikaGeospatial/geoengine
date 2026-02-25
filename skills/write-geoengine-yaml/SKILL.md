@@ -1,6 +1,6 @@
 ---
 name: write-geoengine-yaml
-description: Editing a `geoengine.yaml` configuration file for a GeoEngine worker. This file declares what the worker runs, what inputs it accepts, how to build it, and where to mount data. This skill should run after `write-argparse` so the script already has a functioning argument parser whose flags you can reference to ensure the YAML contract is correct.
+description: Editing a `geoengine.yaml` configuration file for a GeoEngine worker. This file declares what the worker details, what it runs, what inputs it accepts, where to mount data, and plugins to enable. This skill should run after `write-argparse` so the script already has a functioning argument parser whose flags you can reference to ensure the YAML contract is correct.
 ---
 
 ## 1. What Is geoengine.yaml?
@@ -141,10 +141,10 @@ Required **only** when `type: enum`. Lists the allowed string values:
  6. Identify local_dir_mounts (Section 6)
    |
    v
- 7. Assemble the YAML (Section 8)
+ 7. Assemble the YAML (Section 7)
    |
    v
- 8. Verify the contract (Section 9)
+ 8. Verify the contract (Section 8)
    |
    v
  DONE
@@ -451,8 +451,6 @@ After writing the YAML, verify every item:
 | Using underscores in `name` field          | Use hyphens: `my-worker`, not `my_worker`        |
 | Missing `readonly: false` on output dirs   | Script will fail with permission errors           |
 | Adding input params to `local_dir_mounts`  | They are auto-mounted; remove from mounts         |
-| Using `base_env` instead of `base_deps`    | The field is `base_deps`                          |
 | Forgetting `enum_values` for enum types    | YAML is invalid without it                        |
 | Boolean default as `false` (no quotes)     | Use the bare word `false`, YAML parses it as bool |
 | Mismatched names between YAML and parser   | Runtime will fail; names must match exactly        |
-| Missing `build` section for R workers      | R workers need `base_deps: r`                     |
