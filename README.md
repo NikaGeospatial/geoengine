@@ -288,7 +288,7 @@ deploy:
   tenant_id: null
 ```
 
-Dependencies are declared in a `pixi.toml` file alongside the `geoengine.yaml`. Running `geoengine init` generates both files. The `pixi.toml` is used during `geoengine build` to create a reproducible conda/PyPI environment inside the Docker image.
+Dependencies are declared in a `pixi.toml` file alongside the `geoengine.yaml`. Running `geoengine init` generates both files. The `pixi.toml` is used during `geoengine build` to create the conda/PyPI environment inside the Docker image.
 
 Refer to the [Pixi manifest documentation](https://pixi.prefix.dev/latest/reference/pixi_manifest/) for more information on filling in the `pixi.toml` file.
 

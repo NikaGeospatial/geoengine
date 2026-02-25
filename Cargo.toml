@@ -18,7 +18,7 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 
 # Docker API
-bollard = { version = "0.16", features = ["buildkit"] }
+bollard = { version = "0.16", features = ["buildkit", "chrono"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

@@ -502,16 +502,22 @@ impl DockerClient {
             }
         }
 
-        // Inject host UID:GID on Unix so the container process owns its bind-mounted directories
-        #[cfg(unix)]
-        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-        #[cfg(not(unix))]
-        let (uid, gid) = (0, 0);
-
-        #[cfg(unix)]
-        let user = Some(format!("{}:{}", uid, gid));
-        #[cfg(not(unix))]
-        let user: Option<String> = None;
+        // Optionally inject the host UID:GID so the container process owns its
+        // bind-mounted directories.  Skipped for images that expect root or
+        // that manage their own user.
+        let user: Option<String> = if config.inject_host_user {
+            #[cfg(unix)]
+            {
+                let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+                Some(format!("{}:{}", uid, gid))
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        } else {
+            None
+        };
 
         let container_config = Config {
             image: Some(config.image.clone()),

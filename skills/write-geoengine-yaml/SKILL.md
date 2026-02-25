@@ -13,7 +13,6 @@ file is the single source of truth that tells GeoEngine:
  +------------------+------------------------------------------+
  | name             | Worker identity (kebab-case)             |
  | version          | Semantic version                         |
- | build            | Base environment + requirements file     |
  | command          | What program/script to run + its inputs  |
  | local_dir_mounts | Extra host directories to attach         |
  | plugins          | GIS plugin registrations                 |
@@ -125,21 +124,21 @@ Required **only** when `type: enum`. Lists the allowed string values:
    |
    v
  2. Identify language and interpreter
-   |   Python (.py) --> program: python,  base_deps: python
-   |   R      (.R)  --> program: Rscript, base_deps: r
+   |   Python (.py) --> program: python
+   |   R      (.R)  --> program: Rscript
    |
    v
  3. Read the argument parser in the script (written by write-argparse)
    |   Extract every --flag, its type, default, and choices
    |
    v
- 4. Map each flag to a YAML input entry (Section 6)
+ 4. Map each flag to a YAML input entry (Section 5)
    |
    v
  5. Determine readonly for each file/folder input (Section 3)
    |
    v
- 6. Identify local_dir_mounts (Section 7)
+ 6. Identify local_dir_mounts (Section 6)
    |
    v
  7. Assemble the YAML (Section 8)

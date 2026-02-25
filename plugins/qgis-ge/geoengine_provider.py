@@ -462,8 +462,13 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         return ext in supported
 
     @staticmethod
-    def _try_load_output_layer(path: str) -> Optional[str]:
-        """Try loading a CLI output file as a raster or vector layer."""
+    def _try_load_output_layer(path: str, context: QgsProcessingContext) -> Optional[str]:
+        """Try loading a CLI output file as a raster or vector layer.
+
+        Instead of adding the layer directly to the project, registers it with
+        *context* via ``addLayerToLoadOnCompletion`` so that QGIS loads it
+        safely after the algorithm finishes.
+        """
         if not path or not os.path.isfile(path):
             return None
         if not GeoEngineAlgorithm._is_supported_output_file(path):
@@ -488,7 +493,9 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
 
         for layer_type, layer in candidates:
             if layer and layer.isValid():
-                QgsProject.instance().addMapLayer(layer)
+                details = QgsProcessingContext.LayerDetails(layer_name, context.project())
+                context.addLayerToLoadOnCompletion(layer.id(), details)
+                context.temporaryLayerStore().addMapLayer(layer)
                 return layer_type
 
         return None
@@ -737,7 +744,9 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                     if hasattr(value, 'source'):
                         value = value.source()
                     elif hasattr(value, 'dataProvider'):
-                        value = value.dataProvider().dataSourceUri()
+                        provider = value.dataProvider()
+                        if provider is not None:
+                            value = provider.dataSourceUri()
                 inputs[name] = str(value) if value is not None else None
 
         feedback.pushInfo(f"Running worker '{self._worker}'...")
@@ -778,7 +787,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 if kind == 'input' and normalized and normalized in preloaded_project_paths:
                     feedback.pushInfo(f"Input layer already loaded in project: {path}")
                     continue
-                loaded_type = self._try_load_output_layer(path)
+                loaded_type = self._try_load_output_layer(path, context)
                 if loaded_type:
                     loaded_paths.append(path)
                     feedback.pushInfo(f"Loaded {loaded_type} {kind} layer: {path}")

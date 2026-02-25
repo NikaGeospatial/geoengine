@@ -146,7 +146,7 @@ pyproj = ">=3.6,<4"
 # Add Python-only packages here
 ```
 
-These 12 base conda-forge dependencies form GeoEngine's standard Python geospatial
+These 12 base conda-forge dependencies from GeoEngine's standard Python geospatial
 environment are included in the base template. Do **not** touch these dependencies,
 and do **not** include the R geospatial base packages.
 

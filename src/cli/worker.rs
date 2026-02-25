@@ -305,20 +305,10 @@ pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
     if !pixitoml_path.exists() || replaced_pixi {
         let toml_template = match env {
             Some("r") => PixiConfig::r_template(&worker_name),
-            None | Some("py") => PixiConfig::py_template(&worker_name),
-            _ => {
-                anyhow::bail!("Invalid --env: {}. Use either {} or {} and try again.\n{} {} {} created",
-                    env.unwrap(),
-                    "r".bold(),
-                    "py".bold(),
-                    "×".red().bold(),
-                    "pixi.toml".cyan(),
-                    "NOT".bold()
-                )
-            }
+            _ => PixiConfig::py_template(&worker_name),
         };
         let pixi_toml = toml::to_string(&toml_template)?;
-        std::fs::write(&pixitoml_path, pixi_toml)?;
+        fs::write(&pixitoml_path, pixi_toml)?;
         println!(
             "{} Created {} in {}",
             "✓".green().bold(),
@@ -1239,6 +1229,7 @@ pub async fn run_worker(
         remove_on_exit: true,
         detach: false,
         tty: !json_output,
+        inject_host_user: true,
     };
 
     // Print status message

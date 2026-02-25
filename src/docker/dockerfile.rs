@@ -73,7 +73,7 @@ fn generate_dockerignore(ignorefile: &mut File) -> anyhow::Result<()> {
         ".pytest_cache"
     ];
     for ignorable in ignorables.iter() {
-        ignorefile.write_all(format!("{}/\n", ignorable).as_bytes())?;
+        ignorefile.write_all(format!("{ignorable}\n").as_bytes())?;
     }
     Ok(())
 }
