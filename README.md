@@ -124,10 +124,18 @@ When using `--json`, container logs stream to stderr and a structured JSON resul
 {
   "status": "completed",
   "exit_code": 0,
-  "files": []
+  "files": [
+    {
+      "name": "output.geojson",
+      "path": "/path/to/output/file",
+      "size": 123,
+      "kind": "output"
+    }
+  ]
 }
 ```
-To note, the `files` array is currently empty, but this may change in the future.
+Files array outputs the `name`, `path`, `size` (in bytes) and `kind` (either "input" or "output"). `kind` tells the GIS if
+the file is part of the input or the output, as input files are also passed into GIS so that they can be displayed.
 
 **Advanced: input mapping details**
 
