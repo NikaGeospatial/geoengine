@@ -235,6 +235,17 @@ fn collect_input_file_infos(paths: &[PathBuf]) -> Vec<OutputFileInfo> {
 // ---------------------------------------------------------------------------
 
 pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
+    // Validate env early to avoid partial writes on invalid input
+    match env {
+        None | Some("py") | Some("r") => {}
+        Some(invalid) => anyhow::bail!(
+            "Invalid --env: {}. Use either {} or {} and try again.",
+            invalid,
+            "r".bold(),
+            "py".bold()
+        ),
+    }
+
     let current_dir = std::env::current_dir()?;
     let config_path = current_dir.join("geoengine.yaml");
 
@@ -620,6 +631,9 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
     }
     let config = WorkerConfig::load(&worker_path.join("geoengine.yaml"))?;
     verify_worker_config_path_types(&config, &worker_path)?;
+    if config.command.is_none() {
+        anyhow::bail!("No command specified in geoengine.yaml of worker '{}'. Cannot apply.", worker_name);
+    }
     yaml_store::save_config(&config)?;
 
     // Auto-register if not already registered

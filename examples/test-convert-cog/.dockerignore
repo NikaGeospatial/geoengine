@@ -2,3 +2,8 @@ geoengine.yaml
 Dockerfile
 .venv
 .idea
+.pixi
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache

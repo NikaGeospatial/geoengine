@@ -679,7 +679,9 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             if hasattr(value, 'source'):
                 value = value.source()
             elif hasattr(value, 'dataProvider'):
-                value = value.dataProvider().dataSourceUri()
+                provider = value.dataProvider()
+                if provider is not None:
+                    value = provider.dataSourceUri()
 
             path_text = str(value).strip()
             if not path_text:

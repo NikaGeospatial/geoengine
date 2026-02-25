@@ -90,7 +90,7 @@ calculate_ndvi <- function(input_file, output_dir, red_band, nir_band,
 
 option_list <- list(
   make_option(
-    c("-i", "--input-file"),
+    c("-f", "--input-file"),
     type    = "character",
     default = NULL,
     dest    = "input_file",
@@ -118,7 +118,7 @@ option_list <- list(
     help    = "Band index for NIR reflectance [default: 5 (Landsat 8/9)]"
   ),
   make_option(
-    c("-t", "--threshold"),
+    c("--threshold"),
     type    = "double",
     default = NULL,
     dest    = "threshold",

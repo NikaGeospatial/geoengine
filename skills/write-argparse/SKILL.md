@@ -46,7 +46,7 @@ to at most:
 - Add new lines for the argparser.
 
 Do **NOT**:
-- Change any comments nor docstrings.
+- Change any comments or docstrings.
 - Change any function definitions.
 - Change any existing function code.
 
@@ -421,7 +421,7 @@ option_list <- list(
     help    = "Band index for NIR reflectance [default: 5]"
   ),
   make_option(
-    c("-t", "--threshold"),
+    c("--threshold"),
     type    = "double",
     default = NULL,
     dest    = "threshold",

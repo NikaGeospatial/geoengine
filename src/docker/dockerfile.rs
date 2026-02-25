@@ -36,7 +36,6 @@ fn generate_dockerfile_runtime(dockerfile: &mut File) -> anyhow::Result<()> {
     dockerfile.write_all(b"\t&& rm -rf /var/lib/apt/lists/*\n\n")?;
 
     // Copy pixi binary and base environment from build stage
-    dockerfile.write_all(b"COPY --from=build /usr/local/bin/pixi /usr/local/bin/pixi\n")?;
     dockerfile.write_all(b"COPY --from=build /pixi/.pixi/envs/default /pixi/.pixi/envs/default\n")?;
     dockerfile.write_all(b"COPY --from=build --chmod=0755 /pixi/entrypoint.sh /pixi/entrypoint.sh\n")?;
     dockerfile.write_all(b"COPY --from=build /pixi/pixi.toml /pixi/pixi.toml\n\n")?;
@@ -55,17 +54,27 @@ fn generate_dockerfile_runtime(dockerfile: &mut File) -> anyhow::Result<()> {
     dockerfile.write_all(b"ENV PYTHONUNBUFFERED=\"1\"\n\n")?;
 
     // Set entrypoint for pixi to be used by default
-    dockerfile.write_all(b"ENTRYPOINT [\"/pixi/entrypoint.sh\"]")?;
+    dockerfile.write_all(b"ENTRYPOINT [\"/pixi/entrypoint.sh\"]\n")?;
 
     Ok(())
 }
 
 /// Ignored files when building docker image
 fn generate_dockerignore(ignorefile: &mut File) -> anyhow::Result<()> {
-    ignorefile.write_all(b"geoengine.yaml\n")?;
-    ignorefile.write_all(b"Dockerfile\n")?;
-    ignorefile.write_all(b".venv\n")?;
-    ignorefile.write_all(b".idea\n")?;
+    let ignorables = [
+        "geoengine.yaml",
+        "Dockerfile",
+        ".venv",
+        ".idea",
+        ".pixi",
+        "__pycache__",
+        "*.pyc",
+        "*.pyo",
+        ".pytest_cache"
+    ];
+    for ignorable in ignorables.iter() {
+        ignorefile.write_all(format!("{}/\n", ignorable).as_bytes())?;
+    }
     Ok(())
 }
 
