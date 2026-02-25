@@ -101,7 +101,7 @@ The command is run in the current directory by default. It runs the latest produ
 geoengine run --input input_file=/path/to/image.tif --input model=resnet50
 
 # Run the latest dev image (built using `geoengine build --dev`)
-geoengine run --dev
+geoengine run --dev --input input_file=/path/to/image.tif --input model=resnet50
 
 # Run a named worker using its latest production image
 geoengine run my-worker --input input_file=/path/to/image.tif

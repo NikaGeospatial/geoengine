@@ -511,6 +511,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         self,
         layer,
         input_name: str,
+        context: QgsProcessingContext,
         feedback: QgsProcessingFeedback,
     ) -> (str, str):
         """Export a vector layer to a temporary GeoPackage and return (path, temp_dir)."""
@@ -524,7 +525,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         result = QgsVectorFileWriter.writeAsVectorFormatV3(
                 layer,
                 out_path,
-                QgsProject.instance().transformContext(),
+                context.transformContext(),
                 options,
         )
         err_code = result[0] if isinstance(result, tuple) else result
@@ -589,7 +590,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             layer_type = None
 
         if layer_type == QgsMapLayerType.VectorLayer:
-            out_path, temp_dir = self._export_vector_layer_to_temp(layer, input_name, feedback)
+            out_path, temp_dir = self._export_vector_layer_to_temp(layer, input_name, context, feedback)
             return {"path": out_path, "temp_dir": temp_dir}
         if layer_type == QgsMapLayerType.RasterLayer:
             out_path, temp_dir = self._export_raster_layer_to_temp(layer, input_name, context, feedback)
