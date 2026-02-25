@@ -1,0 +1,14 @@
+[workspace]
+name = "ndvi-calculator"
+version = "0.1.0"
+description = "Computes NDVI from multispectral satellite imagery using R"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[dependencies]
+r-base = ">=4.3,<5"
+r-recommended = "*"
+r-sf = "*"
+r-terra = "*"
+r-stars = "*"
+r-optparse = "*"

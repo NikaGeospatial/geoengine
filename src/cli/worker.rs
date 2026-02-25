@@ -4,18 +4,21 @@ use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::time::UNIX_EPOCH;
 use crate::config::worker::WorkerConfig;
 use crate::config::settings::Settings;
 use crate::config::state::{self, sha256_bytes, WorkerState};
 use crate::config::yaml_store;
 use crate::docker::client::DockerClient;
-use crate::docker::config::ContainerConfig;
+use crate::docker::container::ContainerConfig;
 use crate::docker::gpu::GpuConfig;
-use crate::docker::dockerfile::get_dockerfile_config;
 use crate::cli::plugins;
 use crate::cli::plugins::{verify_arcgis_plugin_installed, verify_qgis_plugin_installed};
+use crate::config::pixi::PixiConfig;
+use crate::docker::dockerfile;
 use crate::utils::versioning::{compare_versions, validate_version, get_latest_worker_version_clientless, get_latest_worker_version, compare_worker_version};
 // ---------------------------------------------------------------------------
 // JSON output structs (used by --json flags and plugin integration)
@@ -46,6 +49,8 @@ struct InputDescriptionJson {
     param_type: String,
     required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    readonly: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     default: Option<serde_yaml::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -67,28 +72,185 @@ struct OutputFileInfo {
     name: String,
     path: String,
     size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileFingerprint {
+    size: u64,
+    mtime_nanos: Option<u128>,
+}
+
+fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime_nanos = meta
+        .modified()
+        .ok()
+        .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+        .map(|dur| dur.as_nanos());
+    Some(FileFingerprint {
+        size: meta.len(),
+        mtime_nanos,
+    })
+}
+
+fn collect_file_fingerprints_recursive(path: &Path, out: &mut HashMap<PathBuf, FileFingerprint>) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let meta = fs::metadata(path)
+        .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
+
+    if meta.is_file() {
+        let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(fp) = file_fingerprint(&normalized) {
+            out.insert(normalized, fp);
+        }
+        return Ok(());
+    }
+
+    if !meta.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(path)
+        .with_context(|| format!("Failed to read directory {}", path.display()))?
+    {
+        let entry = entry?;
+        let child = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_file_fingerprints_recursive(&child, out)?;
+        } else if file_type.is_file() {
+            let normalized = child.canonicalize().unwrap_or(child);
+            if let Some(fp) = file_fingerprint(&normalized) {
+                out.insert(normalized, fp);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn snapshot_file_fingerprints(paths: &[PathBuf]) -> HashMap<PathBuf, FileFingerprint> {
+    let mut files = HashMap::new();
+    for path in paths {
+        if let Err(err) = collect_file_fingerprints_recursive(path, &mut files) {
+            eprintln!(
+                "Warning: failed to scan output path '{}': {}",
+                path.display(),
+                err
+            );
+        }
+    }
+    files
+}
+
+fn collect_output_files(
+    writable_mount_roots: &[PathBuf],
+    baseline_files: &HashMap<PathBuf, FileFingerprint>,
+    writable_file_input_targets: &[PathBuf],
+) -> Vec<OutputFileInfo> {
+    let current_files = snapshot_file_fingerprints(writable_mount_roots);
+    let mut candidate_paths: HashSet<PathBuf> = current_files
+        .iter()
+        .filter_map(|(path, current_fp)| match baseline_files.get(path) {
+            None => Some(path.clone()),
+            Some(prev_fp) if prev_fp != current_fp => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for path in writable_file_input_targets {
+        if path.is_file() {
+            let normalized = path.canonicalize().unwrap_or_else(|_| path.clone());
+            candidate_paths.insert(normalized);
+        }
+    }
+
+    let mut files: Vec<OutputFileInfo> = candidate_paths
+        .into_iter()
+        .filter_map(|path| {
+            let meta = fs::metadata(&path).ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            Some(OutputFileInfo {
+                name: path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                path: path.to_string_lossy().to_string(),
+                size: meta.len(),
+                kind: Some("output".to_string()),
+            })
+        })
+        .collect();
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+fn collect_input_file_infos(paths: &[PathBuf]) -> Vec<OutputFileInfo> {
+    let mut dedup = HashSet::new();
+    let mut files: Vec<OutputFileInfo> = Vec::new();
+
+    for path in paths {
+        let normalized = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !dedup.insert(normalized.clone()) {
+            continue;
+        }
+
+        let Ok(meta) = fs::metadata(&normalized) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+
+        files.push(OutputFileInfo {
+            name: normalized
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            path: normalized.to_string_lossy().to_string(),
+            size: meta.len(),
+            kind: Some("input".to_string()),
+        });
+    }
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
 }
 
 // ---------------------------------------------------------------------------
 // geoengine init
 // ---------------------------------------------------------------------------
 
-pub async fn init_worker(name: Option<&str>) -> Result<()> {
+pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
+    // Validate env early to avoid partial writes on invalid input
+    match env {
+        None | Some("py") | Some("r") => {}
+        Some(invalid) => anyhow::bail!(
+            "Invalid --env: {}. Use either {} or {} and try again.",
+            invalid,
+            "r".bold(),
+            "py".bold()
+        ),
+    }
+
     let current_dir = std::env::current_dir()?;
     let config_path = current_dir.join("geoengine.yaml");
 
-    if config_path.exists() {
-        let replace = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("geoengine.yaml already exists in {}. Overwrite existing geoengine.yaml?", current_dir.display()))
-            .items(&["Yes", "No"])
-            .default(1)
-            .interact()?;
-
-        match replace {
-            0 => (),
-            _ => return Ok(())
-        }
-    }
+    let mut replaced_pixi = false;
+    let mut replaced_conf = false;
 
     let worker_name = name
         .map(|s| s.to_string())
@@ -100,28 +262,63 @@ pub async fn init_worker(name: Option<&str>) -> Result<()> {
                 .to_string()
         });
 
-    let mut template = WorkerConfig::template(&worker_name);
+    if config_path.exists() {
+        let replace = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("geoengine.yaml already exists in {}. Overwrite existing geoengine.yaml?", current_dir.display()))
+            .items(&["Yes", "No"])
+            .default(1)
+            .interact()?;
 
-    if let Err(e) = get_dockerfile_config(&current_dir, &mut template) {
+        replaced_conf = match replace {
+            0 => true,
+            _ => false,
+        }
+    }
+
+    if !config_path.exists() || replaced_conf {
+        let template = WorkerConfig::template(&worker_name);
+        let yaml = serde_yaml::to_string(&template)?;
+        std::fs::write(&config_path, yaml)?;
         println!(
-            "{} Dockerfile discovery skipped: {}",
-            "!".yellow().bold(),
-            e
+            "{} Created {} in {}",
+            "✓".green().bold(),
+            "geoengine.yaml".cyan(),
+            current_dir.display()
         );
     }
 
-    let yaml = serde_yaml::to_string(&template)?;
+    let pixitoml_path = current_dir.join("pixi.toml");
 
-    std::fs::write(&config_path, yaml)?;
+    if pixitoml_path.exists() {
+        let replace_pixi = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("pixi.toml already exists in {}. Overwrite existing pixi.toml?", current_dir.display()))
+            .items(&["Yes", "No"])
+            .default(1)
+            .interact()?;
 
-    println!(
-        "{} Created {} in {}",
-        "✓".green().bold(),
-        "geoengine.yaml".cyan(),
-        current_dir.display()
-    );
+        replaced_pixi = match replace_pixi {
+            0 => true,
+            _ => false
+        };
+    }
+
+    if !pixitoml_path.exists() || replaced_pixi {
+        let toml_template = match env {
+            Some("r") => PixiConfig::r_template(&worker_name),
+            _ => PixiConfig::py_template(&worker_name),
+        };
+        let pixi_toml = toml::to_string(&toml_template)?;
+        fs::write(&pixitoml_path, pixi_toml)?;
+        println!(
+            "{} Created {} in {}",
+            "✓".green().bold(),
+            "pixi.toml".cyan(),
+            current_dir.display()
+        );
+    }
+
     println!("\nNext steps:");
-    println!("  1. Edit geoengine.yaml to configure your worker");
+    println!("  1. Edit geoengine.yaml and pixi.toml to configure your worker");
     println!("  2. Run {} to register and build", "geoengine apply".cyan());
 
     Ok(())
@@ -131,19 +328,19 @@ pub async fn init_worker(name: Option<&str>) -> Result<()> {
 // geoengine build
 // ---------------------------------------------------------------------------
 
-pub async fn build_worker_local(no_cache: bool, dev: bool, build_args: &[String]) -> Result<()> {
+pub async fn build_worker_local(no_cache: bool, dev: bool, build_args: &[String], verbose: bool) -> Result<()> {
     let (worker_name, _) = resolve_worker_from_cwd();
-    build_worker(&worker_name, no_cache, dev, build_args).await
+    build_worker(&worker_name, no_cache, dev, build_args, verbose).await
 }
 
-pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &[String]) -> Result<()> {
+pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &[String], verbose: bool) -> Result<()> {
     let settings = Settings::load()?;
     let worker_path = settings.get_worker_path(worker)?;
     let config = yaml_store::load_saved_config(worker)?;
 
     let client = DockerClient::new().await?;
 
-    let new_version = config.version.clone().unwrap_or("".to_string());
+    let new_version = config.version.clone();
 
     // --- Version validation ---
     let ver_cmp = compare_worker_version(worker, &new_version, &client).await;
@@ -278,7 +475,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
     ;
 
     // Parse build args from CLI only
-    let mut args: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut args: HashMap<String, String> = HashMap::new();
     for arg in build_args {
         let parts: Vec<&str> = arg.splitn(2, '=').collect();
         if parts.len() == 2 {
@@ -286,19 +483,26 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         }
     }
 
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")?,
-    );
-    pb.set_message("Building image...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    let pb = if verbose {
+        None
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")?,
+        );
+        pb.set_message("Building image...");
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        Some(pb)
+    };
 
     client
-        .build_image(&dockerfile, &context, &image_tag, &args, no_cache)
+        .build_image(&dockerfile, &context, &image_tag, &args, no_cache, verbose)
         .await?;
 
-    pb.finish_and_clear();
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
     println!(
         "{} Successfully built image: {}",
         "✓".green().bold(),
@@ -316,6 +520,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         command_hash,
         pushed_build_hash,
         image_tag: Some(image_tag),
+        script: prev_state.as_ref().and_then(|s| s.script.clone()),
         plugins_arcgis: prev_state.as_ref().and_then(|s| s.plugins_arcgis),
         plugins_qgis: prev_state.as_ref().and_then(|s| s.plugins_qgis),
     };
@@ -329,7 +534,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
 // ---------------------------------------------------------------------------
 
 pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
-    // 1. Resolve the worker
+    // Resolve the worker
     let (worker_name, worker_path) = if let Some(name) = worker {
         let settings = Settings::load()?;
         match settings.get_worker_path(name) {
@@ -408,16 +613,20 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         }
     };
 
-    // 2. Load current config from YAML and detect changes from saved state. If changed, save it, if not exit.
+    // Load current config from YAML and detect changes from saved state. If changed, save it, if not exit.
     let config_changed = yaml_store::check_changed_config(&worker_name, &worker_path)?;
-    if !config_changed {
+    if !config_changed && worker_path.clone().join("Dockerfile").exists() {
         println!("{} No changes detected in geoengine.yaml of worker '{}'. Nothing to apply.", "!".yellow().bold(), worker_name);
         return Ok(());
     }
     let config = WorkerConfig::load(&worker_path.join("geoengine.yaml"))?;
+    verify_worker_config_path_types(&config, &worker_path)?;
+    if config.command.is_none() {
+        anyhow::bail!("No command specified in geoengine.yaml of worker '{}'. Cannot apply.", worker_name);
+    }
     yaml_store::save_config(&config)?;
 
-    // 3. Auto-register if not already registered
+    // Auto-register if not already registered
     let mut settings = Settings::load()?;
     if settings.workers.get(&worker_name).is_none() {
         let canonical = worker_path.canonicalize().unwrap_or_else(|_| worker_path.clone());
@@ -431,16 +640,31 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         );
     } else {
         println!(
-            "{} Worker '{}' is already registered",
+            "{} Worker '{}' is already registered. Updated geoengine.yaml saved.",
             "✓".green().bold(),
             worker_name.cyan()
         );
     }
 
-    // 4. Load previous state for plugin comparison
+    // Load previous state for plugin comparison
     let prev_state = state::load_state(&worker_name)?;
 
-    // 5. Detect and apply plugin changes
+    // Generate the Dockerfile if not already done so
+    if !worker_path.clone().join("Dockerfile").exists()
+    {
+        if config.command.is_some() {
+            dockerfile::generate_dockerfile(&worker_path)?;
+            println!(
+                "{} Dockerfile generated.",
+                "✓".green().bold(),
+            );
+        }
+        else {
+            anyhow::bail!("No command specified in geoengine.yaml of worker '{}'. Cannot generate Dockerfile.", worker_name);
+        }
+    }
+
+    // Detect and apply plugin changes
     let cur_arcgis = config.plugins.as_ref().and_then(|p| p.arcgis).unwrap_or(false);
     let cur_qgis = config.plugins.as_ref().and_then(|p| p.qgis).unwrap_or(false);
     let prev_arcgis = prev_state.as_ref().and_then(|s| s.plugins_arcgis).unwrap_or(false);
@@ -510,7 +734,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         } else if cur_arcgis && verify_arcgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
-                format!("Tool {} from ArcGIS plugin.", "registered".green())
+                format!("Tool {} in ArcGIS plugin.", "registered".green())
             ));
         } else if !cur_arcgis && verify_arcgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
@@ -574,7 +798,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         } else if cur_qgis && verify_qgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
                 "✓".green(),
-                format!("Tool {} from QGIS plugin.", "registered".green())
+                format!("Tool {} in QGIS plugin.", "registered".green())
             ));
         } else if !cur_qgis && verify_qgis_plugin_installed()? {
             plugin_change_msgs.push(format!("{} {}",
@@ -593,7 +817,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         println!("{} No plugin changes detected", "✓".green().bold());
     }
 
-    // 5b. If plugin flags were reverted, persist to disk and update saved config
+    // If plugin flags were reverted, persist to disk and update saved config
     let config = if yaml_dirty {
         std::fs::write(&yaml_path, &yaml_content)
             .with_context(|| format!("Failed to write reverted YAML to {}", yaml_path.display()))?;
@@ -604,7 +828,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         config
     };
 
-    // 6. Recompute YAML hashes from current files; preserve build hashes from previous state.
+    // Recompute YAML hashes from current files; preserve build hashes from previous state.
     //    yaml_hash: full YAML file hash (used by `apply` change detection)
     //    yaml_build_hash: hash of build-relevant fields only (used by `build`)
     //    dockerfile_hash: preserved from previous state (used by `build`)
@@ -626,6 +850,12 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         None => None,
     };
 
+    let script = Some(config
+        .command
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No command specified in geoengine.yaml of worker '{}'", worker_name))?
+        .script
+        .clone());
     let new_state = WorkerState {
         worker_name: worker_name.clone(),
         applied_at: chrono::Utc::now().to_rfc3339(),
@@ -635,6 +865,7 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         command_hash,
         pushed_build_hash,
         image_tag,
+        script,
         plugins_arcgis: Some(res_arcgis),
         plugins_qgis: Some(res_qgis),
     };
@@ -712,7 +943,7 @@ pub async fn run_worker(
     let config = yaml_store::load_saved_config(&worker_name)?;
 
     // Update if version changed
-    let this_ver = config.version.unwrap_or("latest".to_string());
+    let this_ver = config.version;
 
 
     // Get command config
@@ -734,7 +965,9 @@ pub async fn run_worker(
     // Build extra mounts from input values that are explicitly defined as
     // file/folder inputs in worker config.
     let mut extra_mounts: Vec<(String, String, bool)> = Vec::new();
-    let input_definitions: HashMap<String, (String, bool)> = cmd_config
+    let mut writable_file_input_targets: Vec<PathBuf> = Vec::new();
+    let mut readonly_input_files: Vec<PathBuf> = Vec::new();
+    let input_definitions: HashMap<String, (String, bool, bool)> = cmd_config
         .inputs
         .as_ref()
         .map(|defs| {
@@ -742,7 +975,7 @@ pub async fn run_worker(
                 .map(|d| {
                     (
                         d.name.clone(),
-                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true)),
+                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true), d.required.unwrap_or(true)),
                     )
                 })
                 .collect()
@@ -752,19 +985,47 @@ pub async fn run_worker(
     // Build script arguments from inputs
     let mut script_args: Vec<String> = Vec::new();
     for (key, value) in &inputs {
+        let path = Path::new(match value.as_ref() {
+            "NULL" => "",
+            _ => value,
+        });
         // Only auto-mount for declared file/folder inputs.
-        let path = Path::new(value);
-        let processed_value = if let Some((param_type, readonly)) = input_definitions.get(key) {
+        // Ignore optional fields left blank.
+        let processed_value = if let Some((param_type, readonly, required)) = input_definitions.get(key) {
             match param_type.as_str() {
                 "file" => {
-                    if !path.exists() {
-                        anyhow::bail!(
-                            "Input '{}' is declared as type 'file' but path does not exist: {}",
-                            key,
-                            value
-                        );
-                    }
-                    if !path.is_file() {
+                    // Check if path given is empty, and enforce if it is a required input.
+                    // If path given is not empty, check if it indeed is a file (could be a directory).
+                    // If path given is not empty and is a file, check if it exists and enforce existence if it is readonly, else just create it.
+                    if path.as_os_str().is_empty() {
+                        // If this parameter is not required, it can be empty
+                        match required {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared required but received an empty path: {}",
+                                key,
+                                value
+                            ),
+                            false => {
+                                continue
+                            },
+                        }
+                    } else if !path.exists() {
+                        match readonly {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared as readonly but received a non-existent path: {}",
+                                key,
+                                value
+                            ),
+                            false => {
+                                if let Some(parent) = path.parent() {
+                                    if !parent.as_os_str().is_empty() {
+                                        fs::create_dir_all(parent)?;
+                                    }
+                                }
+                                File::create(path)?;
+                            },
+                        };
+                    } else if !path.is_file() {
                         anyhow::bail!(
                             "Input '{}' is declared as type 'file' but received a non-file path: {}",
                             key,
@@ -779,26 +1040,76 @@ pub async fn run_worker(
                             value
                         )
                     })?;
-                    let abs_path = path
-                        .canonicalize()
-                        .with_context(|| format!("Failed to resolve input file path: {}", value))?;
                     let container_path = format!("/inputs/{}/{}", key, filename.to_string_lossy());
-                    extra_mounts.push((
-                        abs_path.to_string_lossy().to_string(),
-                        container_path.clone(),
-                        *readonly,
-                    ));
+                    if *readonly {
+                        // Readonly file input example: `--mask /data/masks/roi.tif` (must exist).
+                        // Readonly: bind-mount the file directly (it must exist).
+                        let abs_path = path
+                            .canonicalize()
+                            .with_context(|| format!("Failed to resolve input file path: {}", value))?;
+                        readonly_input_files.push(abs_path.clone());
+                        extra_mounts.push((
+                            abs_path.to_string_lossy().to_string(),
+                            container_path.clone(),
+                            true,
+                        ));
+                    } else {
+                        // Writable file input example: `--report /tmp/out/report.json` (may be created).
+                        // Writable: bind-mount the parent directory so the container path
+                        // /inputs/<key>/ exists as a real directory. Mounting a single file
+                        // into a non-existent container directory causes EACCES/ENOENT on write.
+                        let parent = path.parent().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Input '{}' has no parent directory: {}",
+                                key,
+                                value
+                            )
+                        })?;
+                        let abs_parent = parent
+                            .canonicalize()
+                            .with_context(|| format!("Failed to resolve parent directory for input '{}': {}", key, value))?;
+                        let abs_file = path
+                            .canonicalize()
+                            .with_context(|| format!("Failed to resolve writable file input '{}': {}", key, value))?;
+                        writable_file_input_targets.push(abs_file);
+                        let container_dir = format!("/inputs/{}", key);
+                        extra_mounts.push((
+                            abs_parent.to_string_lossy().to_string(),
+                            container_dir,
+                            false,
+                        ));
+                    }
                     container_path
                 }
                 "folder" => {
-                    if !path.exists() {
-                        anyhow::bail!(
-                            "Input '{}' is declared as type 'folder' but path does not exist: {}",
-                            key,
-                            value
-                        );
-                    }
-                    if !path.is_dir() {
+                    // Folder input example: `--scratch /tmp/work` or `--config_dir /etc/geoengine`.
+                    // Check if path given is empty, and enforce if it is a required input.
+                    // If path given is not empty, check if it indeed is a directory (could be a file).
+                    // If path given is not empty and is a directory, check if it exists and enforce existence if it is readonly, else just create it.
+                    if path.as_os_str().is_empty() {
+                        // If this parameter is not required, it can be empty
+                        match required {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared required but received an empty path: {}",
+                                key,
+                                value
+                            ),
+                            false => {
+                                continue
+                            },
+                        }
+                    } else if !path.exists() {
+                        // If readonly, require the folder to exist (e.g., `/data/input`).
+                        // If writable, create it (e.g., `/tmp/work`).
+                        match readonly {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared as readonly but received a non-existent path: {}",
+                                key,
+                                value
+                            ),
+                            false => std::fs::create_dir_all(path)?,
+                        };
+                    } else if !path.is_dir() {
                         anyhow::bail!(
                             "Input '{}' is declared as type 'folder' but received a non-directory path: {}",
                             key,
@@ -817,7 +1128,21 @@ pub async fn run_worker(
                     ));
                     container_path
                 }
-                _ => value.clone(),
+                _ => {
+                    if value.is_empty() {
+                        match required {
+                            true => anyhow::bail!(
+                                "Input '{}' is declared required but received an empty value: {}",
+                                key,
+                                value
+                            ),
+                            false => {
+                                continue
+                            },
+                        }
+                    }
+                    value.clone()
+                },
             }
         } else {
             value.clone()
@@ -847,6 +1172,18 @@ pub async fn run_worker(
         }
     }
     mounts.extend(extra_mounts);
+
+    let writable_mount_roots: Vec<PathBuf> = mounts
+        .iter()
+        .filter(|(_, _, readonly)| !*readonly)
+        .map(|(host_path, _, _)| PathBuf::from(host_path))
+        .collect();
+
+    let baseline_output_files = if json_output {
+        snapshot_file_fingerprints(&writable_mount_roots)
+    } else {
+        HashMap::new()
+    };
 
     // Build full command
     let full_command = if script_args.is_empty() {
@@ -892,6 +1229,7 @@ pub async fn run_worker(
         remove_on_exit: true,
         detach: false,
         tty: !json_output,
+        inject_host_user: true,
     };
 
     // Print status message
@@ -913,6 +1251,22 @@ pub async fn run_worker(
 
     // Handle output
     if json_output {
+        let mut files = collect_output_files(
+            &writable_mount_roots,
+            &baseline_output_files,
+            &writable_file_input_targets,
+        );
+        let input_files = collect_input_file_infos(&readonly_input_files);
+        let mut by_path: HashMap<String, OutputFileInfo> = HashMap::new();
+        for file in input_files {
+            by_path.insert(file.path.clone(), file);
+        }
+        for file in files.drain(..) {
+            // Outputs win over inputs for the same path.
+            by_path.insert(file.path.clone(), file);
+        }
+        let mut merged: Vec<OutputFileInfo> = by_path.into_values().collect();
+        merged.sort_by(|a, b| a.path.cmp(&b.path));
         let result = RunResult {
             status: if exit_code == 0 { "completed".to_string() } else { "failed".to_string() },
             exit_code,
@@ -921,7 +1275,7 @@ pub async fn run_worker(
             } else {
                 None
             },
-            files: Vec::new(),
+            files: merged,
         };
         println!("{}", serde_json::to_string(&result)?);
     } else if exit_code == 0 {
@@ -951,6 +1305,7 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
                 name: i.name.clone(),
                 param_type: i.param_type.clone(),
                 required: i.required.unwrap_or(true),
+                readonly: i.readonly,
                 default: i.default.clone(),
                 description: i.description.clone(),
                 enum_values: i.enum_values.clone(),
@@ -963,7 +1318,7 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
     let desc = WorkerDescription {
         name: config.name.clone(),
         description: config.description.clone(),
-        version: config.version.clone(),
+        version: Some(config.version.clone()),
         version_built,
         inputs,
     };
@@ -1009,7 +1364,7 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
                     }
                 }
                 else {
-                    let version_cmp = compare_versions(&config.version.clone().unwrap(), built_ver.clone().unwrap().as_ref());
+                    let version_cmp = compare_versions(&config.version.clone(), built_ver.clone().unwrap().as_ref());
                     match version_cmp {
                         Ok(order) => match order {
                             Ordering::Equal => {
@@ -1522,5 +1877,73 @@ fn shell_escape(s: &str) -> String {
         format!("'{}'", s.replace('\'', "'\\''"))
     } else {
         s.to_string()
+    }
+}
+
+/// Verifies path-typed `geoengine.yaml` entries for a worker.
+///
+/// For now this checks:
+/// - `command.script` exists and is a file
+/// - each `local_dir_mounts[*].host_path` exists and is a directory
+///
+/// Note: relative paths are resolved against the provided `worker_path`.
+/// If path resolution rules change, keep this function and its call sites aligned.
+fn verify_worker_config_path_types(config: &WorkerConfig, worker_path: &Path) -> Result<()> {
+    let mut errors = Vec::new();
+
+    if let Some(command) = &config.command {
+        let script_path = Path::new(&command.script);
+        let script_path = if script_path.is_absolute() {
+            script_path.to_path_buf()
+        } else {
+            worker_path.join(script_path)
+        };
+
+        if !script_path.exists() {
+            errors.push(format!(
+                "Worker '{}': command.script does not exist: {}",
+                config.name,
+                script_path.display()
+            ));
+        } else if !script_path.is_file() {
+            errors.push(format!(
+                "Worker '{}': command.script is not a file: {}",
+                config.name,
+                script_path.display()
+            ));
+        }
+    }
+
+    if let Some(mounts) = &config.local_dir_mounts {
+        for (idx, mount) in mounts.iter().enumerate() {
+            let host_path = Path::new(&mount.host_path);
+            let host_path = if host_path.is_absolute() {
+                host_path.to_path_buf()
+            } else {
+                worker_path.join(host_path)
+            };
+
+            if !host_path.exists() {
+                errors.push(format!(
+                    "Worker '{}': local_dir_mounts[{}].host_path does not exist: {}",
+                    config.name,
+                    idx,
+                    host_path.display()
+                ));
+            } else if !host_path.is_dir() {
+                errors.push(format!(
+                    "Worker '{}': local_dir_mounts[{}].host_path is not a directory: {}",
+                    config.name,
+                    idx,
+                    host_path.display()
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("geoengine.yaml path validation failed:\n{}", errors.join("\n"))
     }
 }

@@ -2,7 +2,7 @@
 name=GeoEngine
 qgisMinimumVersion=3.0
 description=Integrates GeoEngine containerized geoprocessing tools into QGIS
-version=0.2.0
+version=0.3.0
 author=GeoEngine Team
 email=geoengine@example.com
 
@@ -32,6 +32,10 @@ experimental=True
 deprecated=False
 
 changelog=
+    0.3.0 - Input layers and output into layers integration
+        - Added support for input files to select existing layers
+        - Allow output files to directly add themselves as layers to QGIS
+        - Added support to open output file directory on completion of worker
     0.2.0 - Direct CLI integration
         - Removed dependency on proxy service for tool execution
         - Tools now invoke geoengine CLI directly via subprocess

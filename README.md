@@ -47,14 +47,17 @@ irm https://raw.githubusercontent.com/NikaGeospatial/geoengine/main/install/inst
 ### Create and Apply a Worker
 
 ```bash
-# Initialize a new worker (creates geoengine.yaml template)
+# Initialize a new worker (creates geoengine.yaml and pixi.toml templates)
 # Name is optional, if not specified, the current directory name is used
 geoengine init --name my-worker
 
-# Edit geoengine.yaml to configure your worker
-# Add your Dockerfile and scripts
+# Use --env to select the environment type: "py" (default) or "r"
+geoengine init --name my-worker --env r
 
-# Apply: registers the worker if new, saves worker config, and prompts GIS plugin installation if not already installed
+# Edit geoengine.yaml and pixi.toml to configure your worker
+# Add your scripts
+
+# Apply: registers the worker if new, saves worker config, generates Dockerfile, and prompts GIS plugin installation if not already installed
 geoengine apply
 
 # Build: builds the Docker image (detects file changes and enforces versioning)
@@ -63,6 +66,7 @@ geoengine build
 
 `geoengine apply` handles worker registration and GIS plugin management. It checks whether the worker is registered (and registers it if not) and applies any changes to the `plugins` section of `geoengine.yaml`.
 It saves the current configuration of the worker, and this saved configuration is used for `build` and `run`.
+If no Dockerfile is present, `apply` will generate one automatically.
 Hence, please make sure to apply your changes **before** building or running a worker.
 
 `geoengine build` handles Docker image builds with smart change detection:
@@ -97,7 +101,7 @@ The command is run in the current directory by default. It runs the latest produ
 geoengine run --input input_file=/path/to/image.tif --input model=resnet50
 
 # Run the latest dev image (built using `geoengine build --dev`)
-geoengine run --dev
+geoengine run --dev --input input_file=/path/to/image.tif --input model=resnet50
 
 # Run a named worker using its latest production image
 geoengine run my-worker --input input_file=/path/to/image.tif
@@ -127,8 +131,8 @@ To note, the `files` array is currently empty, but this may change in the future
 
 **Advanced: input mapping details**
 
-- File inputs are mounted read-only at `/inputs/<key>/<filename>`.
-- Directory inputs are mounted read-only at `/mnt/input_N/`.
+- File inputs are mounted at `/inputs/<key>/<filename>`.
+- Directory inputs are mounted at `/mnt/input_<key>/`.
 - If an input value does not exist as a local path, it is passed through as a plain string value.
 
 ### Check for Changes
@@ -137,7 +141,7 @@ To note, the `files` array is currently empty, but this may change in the future
 # Check all tracked files (geoengine.yaml, Dockerfile, command script)
 geoengine diff
 
-# Check only the YAML configuration
+# Check only the geoengine.yaml configuration
 geoengine diff --file yaml
 
 # Check only the Dockerfile
@@ -145,6 +149,9 @@ geoengine diff --file docker
 
 # Check only the command script (e.g. main.py)
 geoengine diff --file command
+
+# Equivalent to no --file flag
+geoengine diff --file all
 ```
 
 ### Manage Workers
@@ -199,7 +206,9 @@ geoengine deploy push my-image:latest \
 
 Example workers are available in the [examples](examples) directory. Feel free to try them out by `cd`-ing into the worker directories and running `geoengine apply` followed by `geoengine build`.
 
-- [Simple Converter](examples/converter) - Takes an input directory, converts files to a specified format, and writes results to an output directory.
+- [NDVI Calculator](examples/ndvi-calculator) - Computes NDVI from multispectral satellite imagery using R.
+- [Synthetic Hotspot Analysis](examples/synthetic-hotspot-analysis) - Spatial hotspot analysis from study area, incidents, and facilities layers.
+- [COG Converter](examples/test-convert-cog) - Converts GeoTIFF to Cloud Optimized GeoTIFF.
 
 ## Versioning
 Workers are versioned using [Semantic Versioning](https://semver.org/). GeoEngine will enforce this when building images.
@@ -234,6 +243,7 @@ command:
       type: folder
       required: true
       description: "Output folder for classification results"
+      readonly: false
 
     - name: model
       type: enum
@@ -278,17 +288,21 @@ deploy:
   tenant_id: null
 ```
 
+Dependencies are declared in a `pixi.toml` file alongside the `geoengine.yaml`. Running `geoengine init` generates both files. The `pixi.toml` is used during `geoengine build` to create the conda/PyPI environment inside the Docker image.
+
+Refer to the [Pixi manifest documentation](https://pixi.prefix.dev/latest/reference/pixi_manifest/) for more information on filling in the `pixi.toml` file.
+
 ### Configuration Reference
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | String | Yes | Worker name (used for image tagging and registration) |
-| `version` | String | No | Worker version |
-| `description` | String | No | Human-readable description |
-| `command` | Object | Yes | Container command configuration |
-| `local_dir_mounts` | Array | No | Persistent directory mounts |
-| `plugins` | Object | No | GIS plugin flags |
-| `deploy` | Object | No | Cloud deployment settings |
+| Field | Type | Required | Description                                           |
+|-------|------|----------|-------------------------------------------------------|
+| `name` | String | Yes      | Worker name (used for image tagging and registration) |
+| `version` | String | Yes      | Worker version                                        |
+| `description` | String | No       | Human-readable description                            |
+| `command` | Object | Yes      | Container command configuration                       |
+| `local_dir_mounts` | Array | No       | Persistent directory mounts                           |
+| `plugins` | Object | No       | GIS plugin flags                                      |
+| `deploy` | Object | No       | Cloud deployment settings                             |
 
 ### `command` Section
 
@@ -300,21 +314,22 @@ deploy:
 
 ### `command.inputs[]` Items
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `name` | String | Yes | -- | Parameter name (becomes `--name` flag) |
-| `type` | String | Yes | -- | Parameter type (see below) |
-| `required` | Boolean | No | `true` | Whether the parameter is required |
-| `default` | Any | No | `null` | Default value |
-| `description` | String | No | `null` | Help text |
-| `enum_values` | Array | No | `null` | Valid choices (for `enum` type) |
+| Field | Type | Required | Default | Description                                                            |
+|-------|------|----------|---------|------------------------------------------------------------------------|
+| `name` | String | Yes | --      | Parameter name (becomes `--name` flag)                                 |
+| `type` | String | Yes | --      | Parameter type (see below)                                             |
+| `required` | Boolean | No | `true`  | Whether the parameter is required                                      |
+| `default` | Any | No | `null`  | Default value                                                          |
+| `description` | String | No | `null`  | Help text                                                              |
+| `enum_values` | Array | No | `null`  | Valid choices (for `enum` type)                                        |
+| `readonly` | Boolean | No | `true`  | ONLY for file/folder types. Set to `false` for output file/folder paths that the worker writes to. |
 
 **Supported Input Types:**
 
 | Type | Description |
 |------|-------------|
-| `file` | File path (mounted read-only into container) |
-| `folder` | Directory path (mounted read-only into container) |
+| `file` | File path (mounted into container; use `readonly: false` for output files) |
+| `folder` | Directory path (mounted into container; use `readonly: false` for output folders) |
 | `string` | Text value |
 | `number` | Numeric value |
 | `boolean` | Boolean value |
@@ -403,16 +418,35 @@ CUDA is not available on macOS. PyTorch will automatically use the MPS (Metal) b
 
 | Command                                                        | Description                                                                                 |
 |----------------------------------------------------------------|---------------------------------------------------------------------------------------------|
-| `geoengine init [--name]`                                      | Create a new `geoengine.yaml` template                                                      |
-| `geoengine apply <worker>`                                     | Register worker and manage GIS plugins                                                      |
+| `geoengine init [--name] [--env py\|r]`                        | Create a new `geoengine.yaml` and `pixi.toml` template                                     |
+| `geoengine apply [<worker>]`                                   | Register worker, generate Dockerfile if missing, save config, and manage GIS plugins        |
 | `geoengine build [--no-cache] [--dev] [--build-arg KEY=VALUE]` | Build the Docker image (with file change detection and version enforcement in non-dev mode) |
-| `geoengine run <worker> --input KEY=VALUE [--json] [--dev]`    | Run a worker's command                                                                      |
+| `geoengine run [<worker>] --input KEY=VALUE [--json] [--dev]`  | Run a worker's command                                                                      |
 | `geoengine diff [--file all\|yaml\|docker\|command]`           | Check which tracked files have changed since last apply                                     |
 | `geoengine delete [--name <worker>]`                           | Delete a worker, clean up state and saved configuration                                     |
 | `geoengine workers [--json] [--gis arcgis\|qgis]`              | List registered workers                                                                     |
-| `geoengine describe <worker> [--json]`                         | Displays information from saved configuration file of specified worker                      |
+| `geoengine describe [<worker>] [--json]`                       | Displays information from saved configuration file of specified worker                      |
 | `geoengine image list\|import\|remove`                         | Manage Docker images                                                                        |
 | `geoengine deploy auth\|push\|pull\|list`                      | GCP Artifact Registry operations                                                            |
+
+## AI Agents Support
+AI Agents are able to assist users in automatically deploying workers from scripts. These are done using AI agent skills,
+defined in the `skills` folder. They contain `SKILL.md` files with instructions on how to operate certain parts of the workflow.
+In order to use AI Agents, refer to the respective sections below.
+
+### Activating Skills
+To activate a skill, copy the contents of the `/skills` folder into the respective skills folder of the agent:
+- Claude: `~/.claude/skills`
+- Codex: `~/.codex/skills`
+
+### Using Skills
+After copying the folder, the skills should be made available to the agent. Allow the agent access to the directory that
+contains your script, then prompt the agent your needs. For example (in `examples/synthetic-hotspot-analysis`):
+```aiignore
+Make the function `run_hotspot_analysis_from_files()` from `hotspot_analysis.py` a GeoEngine worker.
+```
+The agent will then run the whole process stipulated above automatically, even creating an argument parser if not already available
+in the script.
 
 ## Building from Source
 

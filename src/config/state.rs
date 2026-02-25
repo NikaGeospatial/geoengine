@@ -20,7 +20,10 @@ pub struct WorkerState {
     pub command_hash: Option<String>,
     /// Concatenated YAML build hash, dockerfile hash, and command hash for pushed build (if present)
     pub pushed_build_hash: Option<String>,
+    /// Latest pushed image tag (non-dev)
     pub image_tag: Option<String>,
+    /// Main script
+    pub script: Option<String>,
     pub plugins_arcgis: Option<bool>,
     pub plugins_qgis: Option<bool>,
 }

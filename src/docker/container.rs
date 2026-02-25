@@ -13,4 +13,8 @@ pub struct ContainerConfig {
     pub remove_on_exit: bool,
     pub detach: bool,
     pub tty: bool,
+    /// When true, the container's user is set to the host UID:GID so that
+    /// bind-mounted directories are owned by the current user.  Leave false
+    /// for images that expect to run as root or that manage their own user.
+    pub inject_host_user: bool,
 }

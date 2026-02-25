@@ -10,7 +10,7 @@ pub struct WorkerConfig {
     pub name: String,
 
     /// Worker version
-    pub version: Option<String>,
+    pub version: String,
 
     /// Worker description
     pub description: Option<String>,
@@ -118,8 +118,9 @@ impl WorkerConfig {
     pub fn build_relevant_hash(&self) -> String {
         let build_fields = serde_json::json!({
             "name": self.name,
+            "version": self.version,
             "command": self.command.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default()),
-            "local_dir_mounts": self.local_dir_mounts.as_ref().map(|m| serde_json::to_value(m).unwrap_or_default()),
+            "local_dir_mounts": self.local_dir_mounts.as_ref().map(|m| serde_json::to_value(m).unwrap_or_default())
         });
         state::sha256_string(&build_fields.to_string())
     }
@@ -128,7 +129,7 @@ impl WorkerConfig {
     pub fn template(name: &str) -> Self {
         WorkerConfig {
             name: name.to_string(),
-            version: Some("1.0".to_string()),
+            version: "1.0.0".to_string(),
             description: Some("A geoengine worker".to_string()),
             command: Some(CommandConfig {
                 program: "python".to_string(),
