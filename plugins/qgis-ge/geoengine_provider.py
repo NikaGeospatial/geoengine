@@ -9,19 +9,30 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from typing import Any, Callable, Dict, List, Optional
 
+from qgis.PyQt.QtCore import QUrl
+from qgis.PyQt.QtGui import QDesktopServices
 from qgis.core import (
+    QgsMapLayerType,
     QgsProcessingAlgorithm,
     QgsProcessingContext,
     QgsProcessingFeedback,
+    QgsProcessingParameterMapLayer,
     QgsProcessingParameterString,
     QgsProcessingParameterNumber,
     QgsProcessingParameterBoolean,
     QgsProcessingParameterFile,
     QgsProcessingParameterEnum,
     QgsProcessingProvider,
-    QgsSettings
+    QgsProject,
+    QgsRasterFileWriter,
+    QgsRasterLayer,
+    QgsRasterPipe,
+    QgsSettings,
+    QgsVectorLayer,
+    QgsVectorFileWriter,
 )
 
 
@@ -42,6 +53,7 @@ def set_dev_mode_enabled(enabled: bool) -> None:
     s = QgsSettings()
     s.setValue(DEV_MODE_SETTING_KEY, enabled)
     s.sync()
+
 
 class GeoEngineCLIClient:
     """Client that invokes the geoengine CLI binary via subprocess."""
@@ -245,6 +257,7 @@ class GeoEngineProvider(QgsProcessingProvider):
 
 class GeoEngineAlgorithm(QgsProcessingAlgorithm):
     """Dynamic QGIS Processing algorithm for a GeoEngine worker."""
+    OPEN_OUTPUT_FOLDER_PARAM = "__geoengine_open_output_folder"
 
     def __init__(self, worker_name: str, tool_info: Dict):
         """Initialize an algorithm wrapper for a worker definition."""
@@ -283,6 +296,14 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             param = self._create_parameter(inp)
             if param:
                 self.addParameter(param)
+        self.addParameter(
+            QgsProcessingParameterBoolean(
+                self.OPEN_OUTPUT_FOLDER_PARAM,
+                "Open output folder when complete",
+                defaultValue=False,
+                optional=True,
+            )
+        )
 
     def _create_parameter(self, param_info: Dict):
         """Create a QGIS parameter from worker input parameter info."""
@@ -292,9 +313,15 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         required = param_info.get('required', True)
         default = param_info.get('default')
         enum_values = param_info.get('enum_values', [])
+        readonly = param_info.get('readonly', True)
 
         if param_type == 'file':
-            param = QgsProcessingParameterFile(name, label, optional=not required)
+            if readonly:
+                # Read-only file inputs are typically geospatial layers; let users
+                # choose an existing layer or browse to an external layer source.
+                param = QgsProcessingParameterMapLayer(name, label, optional=not required)
+            else:
+                param = QgsProcessingParameterFile(name, label, optional=not required)
         elif param_type == 'folder':
             param = QgsProcessingParameterFile(
                 name, label, behavior=QgsProcessingParameterFile.Folder, optional=not required
@@ -322,6 +349,358 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
 
         return param
 
+    @staticmethod
+    def _strip_qgis_source_uri_suffix(source: str) -> str:
+        """Strip QGIS provider URI suffixes like '|layername=foo' from local file sources."""
+        if not source:
+            return source
+        if source.startswith("file://"):
+            local = QUrl(source).toLocalFile()
+            if local:
+                source = local
+        if '|' in source:
+            source = source.split('|', 1)[0]
+        return source
+
+    @classmethod
+    def _normalize_local_file_path(cls, path_or_uri: str) -> Optional[str]:
+        """Normalize a local file path/URI; return None for non-local/unusable sources."""
+        if not path_or_uri:
+            return None
+        source = cls._strip_qgis_source_uri_suffix(str(path_or_uri))
+        if not source:
+            return None
+        if source.startswith(('/vsimem/', 'memory:')) or source.startswith('dbname='):
+            return None
+        if os.path.isfile(source):
+            return os.path.realpath(source)
+        return None
+
+    @classmethod
+    def _normalize_local_dir_path(cls, path_or_uri: str) -> Optional[str]:
+        """Normalize a local directory path/URI; return None for non-local/unusable sources."""
+        if not path_or_uri:
+            return None
+        source = cls._strip_qgis_source_uri_suffix(str(path_or_uri))
+        if not source:
+            return None
+        if source.startswith(('/vsimem/', 'memory:')) or source.startswith('dbname='):
+            return None
+        if os.path.isdir(source):
+            return os.path.realpath(source)
+        return None
+
+    @staticmethod
+    def _result_file_entries(result: Dict) -> List[Dict[str, Any]]:
+        """Extract normalized file entries from the CLI JSON result payload."""
+        entries: List[Dict[str, Any]] = []
+        seen = set()
+        for entry in result.get('files', []) or []:
+            if isinstance(entry, str):
+                entry = {'path': entry}
+            if not isinstance(entry, dict):
+                continue
+            path = entry.get('path')
+            kind = str(entry.get('kind') or 'output')
+            if isinstance(entry, dict):
+                path = entry.get('path')
+            if not path:
+                continue
+            path = str(path)
+            key = (path, kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({
+                'path': path,
+                'kind': kind,
+                'name': entry.get('name'),
+                'size': entry.get('size'),
+            })
+        return entries
+
+    @staticmethod
+    def _parameter_bool(parameters: Dict, name: str, default: bool = False) -> bool:
+        """Coerce a processing parameter value to bool."""
+        if name not in parameters:
+            return default
+        value = parameters.get(name)
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+    @classmethod
+    def _project_loaded_file_paths(cls) -> set:
+        """Return normalized local file paths currently loaded in the project."""
+        loaded = set()
+        for layer in QgsProject.instance().mapLayers().values():
+            try:
+                source = layer.source()
+            except Exception:
+                continue
+            normalized = cls._normalize_local_file_path(source)
+            if normalized:
+                loaded.add(normalized)
+        return loaded
+
+    @staticmethod
+    def _is_supported_output_file(path: str) -> bool:
+        """Return True for likely GIS layer files and False for common sidecars."""
+        lower_name = os.path.basename(path).lower()
+        if lower_name.endswith(('.aux.xml', '.ovr', '.prj', '.shx', '.dbf', '.cpg', '.qix', '.sbn', '.sbx')):
+            return False
+
+        ext = os.path.splitext(lower_name)[1]
+        supported = {
+            '.shp', '.gpkg', '.geojson', '.json', '.kml', '.gml', '.sqlite',
+            '.tif', '.tiff', '.vrt', '.img', '.jp2', '.asc'
+        }
+        return ext in supported
+
+    @staticmethod
+    def _try_load_output_layer(path: str) -> Optional[str]:
+        """Try loading a CLI output file as a raster or vector layer."""
+        if not path or not os.path.isfile(path):
+            return None
+        if not GeoEngineAlgorithm._is_supported_output_file(path):
+            return None
+
+        layer_name = os.path.splitext(os.path.basename(path))[0] or os.path.basename(path)
+        ext = os.path.splitext(path.lower())[1]
+
+        raster_exts = {'.tif', '.tiff', '.vrt', '.img', '.jp2', '.asc'}
+        vector_exts = {'.shp', '.gpkg', '.geojson', '.json', '.kml', '.gml', '.sqlite'}
+
+        candidates = []
+        if ext in raster_exts:
+            candidates = [('raster', QgsRasterLayer(path, layer_name))]
+        elif ext in vector_exts:
+            candidates = [('vector', QgsVectorLayer(path, layer_name, 'ogr'))]
+        else:
+            candidates = [
+                ('raster', QgsRasterLayer(path, layer_name)),
+                ('vector', QgsVectorLayer(path, layer_name, 'ogr')),
+            ]
+
+        for layer_type, layer in candidates:
+            if layer and layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                return layer_type
+
+        return None
+
+    @staticmethod
+    def _safe_temp_stem(name: str) -> str:
+        """Build a filesystem-safe stem for temp exports."""
+        raw = (name or "input").strip()
+        cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw)
+        return cleaned or "input"
+
+    def _export_vector_layer_to_temp(
+        self,
+        layer,
+        input_name: str,
+        feedback: QgsProcessingFeedback,
+    ) -> (str, str):
+        """Export a vector layer to a temporary GeoPackage and return (path, temp_dir)."""
+        temp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-input-")
+        out_path = os.path.join(temp_dir, f"{self._safe_temp_stem(input_name)}.gpkg")
+        feedback.pushInfo(f"Exporting non-file-backed vector input '{input_name}' to temp file...")
+
+        result = QgsVectorFileWriter.writeAsVectorFormat(
+            layer,
+            out_path,
+            "UTF-8",
+            layer.crs(),
+            "GPKG",
+        )
+        err_code = result[0] if isinstance(result, tuple) else result
+        if err_code != QgsVectorFileWriter.NoError:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise Exception(f"Failed to export vector input '{input_name}' to temporary GeoPackage")
+
+        return out_path, temp_dir
+
+    def _export_raster_layer_to_temp(
+        self,
+        layer,
+        input_name: str,
+        context: QgsProcessingContext,
+        feedback: QgsProcessingFeedback,
+    ) -> (str, str):
+        """Export a raster layer to a temporary GeoTIFF and return (path, temp_dir)."""
+        temp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-input-")
+        out_path = os.path.join(temp_dir, f"{self._safe_temp_stem(input_name)}.tif")
+        feedback.pushInfo(f"Exporting non-file-backed raster input '{input_name}' to temp file...")
+
+        provider = layer.dataProvider()
+        if provider is None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise Exception(f"Raster input '{input_name}' has no data provider")
+
+        pipe = QgsRasterPipe()
+        provider_clone = provider.clone()
+        if provider_clone is None or not pipe.set(provider_clone):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise Exception(f"Failed to prepare raster pipe for input '{input_name}'")
+
+        writer = QgsRasterFileWriter(out_path)
+        writer.setOutputFormat("GTiff")
+        result = writer.writeRaster(
+            pipe,
+            provider.xSize(),
+            provider.ySize(),
+            provider.extent(),
+            provider.crs(),
+            context.transformContext(),
+        )
+        no_error = getattr(QgsRasterFileWriter, "NoError", 0)
+        if result != no_error:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise Exception(f"Failed to export raster input '{input_name}' to temporary GeoTIFF")
+
+        return out_path, temp_dir
+
+    def _export_layer_to_temp_if_needed(
+        self,
+        layer,
+        input_name: str,
+        context: QgsProcessingContext,
+        feedback: QgsProcessingFeedback,
+    ) -> Optional[Dict[str, str]]:
+        """Export a non-file-backed layer to a temp file and return metadata."""
+        try:
+            layer_type = layer.type()
+        except Exception:
+            layer_type = None
+
+        if layer_type == QgsMapLayerType.VectorLayer:
+            out_path, temp_dir = self._export_vector_layer_to_temp(layer, input_name, feedback)
+            return {"path": out_path, "temp_dir": temp_dir}
+        if layer_type == QgsMapLayerType.RasterLayer:
+            out_path, temp_dir = self._export_raster_layer_to_temp(layer, input_name, context, feedback)
+            return {"path": out_path, "temp_dir": temp_dir}
+        raise Exception(f"Unsupported map layer type for input '{input_name}'")
+
+    def _resolve_readonly_file_input(
+        self,
+        name: str,
+        parameters: Dict,
+        context: QgsProcessingContext,
+        feedback: QgsProcessingFeedback,
+    ) -> Dict[str, Any]:
+        """Resolve a read-only file input from a map-layer parameter to a local path."""
+        layer = self.parameterAsLayer(parameters, name, context)
+        if layer is not None:
+            source = None
+            try:
+                source = layer.source()
+            except Exception:
+                source = None
+            if not source and hasattr(layer, 'dataProvider') and layer.dataProvider():
+                try:
+                    source = layer.dataProvider().dataSourceUri()
+                except Exception:
+                    source = None
+            source_text = str(source or "")
+            # Provider URIs with sublayer selectors (e.g. GeoPackage layername)
+            # should preserve the selected layer, so export instead of stripping.
+            if "|" in source_text:
+                normalized = None
+            else:
+                normalized = self._normalize_local_file_path(source_text)
+            if normalized:
+                return {"path": normalized, "temp_dir": None, "exported_temp": False}
+            exported = self._export_layer_to_temp_if_needed(layer, name, context, feedback)
+            if exported:
+                return {"path": exported["path"], "temp_dir": exported["temp_dir"], "exported_temp": True}
+            return {"path": str(source) if source else None, "temp_dir": None, "exported_temp": False}
+
+        raw_value = parameters.get(name)
+        if raw_value is None:
+            return {"path": None, "temp_dir": None, "exported_temp": False}
+        raw_text = str(raw_value)
+        normalized = self._normalize_local_file_path(raw_text)
+        return {"path": normalized or raw_text, "temp_dir": None, "exported_temp": False}
+
+    def _maybe_open_output_folder(
+        self,
+        output_dirs: List[str],
+        feedback: QgsProcessingFeedback,
+        enabled: bool,
+    ) -> None:
+        """Open all deduped output directories when enabled for this run."""
+        if not enabled:
+            return
+
+        if not output_dirs:
+            return
+
+        for folder in output_dirs:
+            if not folder or not os.path.isdir(folder):
+                continue
+            ok = QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+            if ok:
+                feedback.pushInfo(f"Opened output folder: {folder}")
+            else:
+                feedback.pushInfo(f"Could not open output folder: {folder}")
+
+    def _output_dirs_from_parameters(
+        self,
+        parameters: Dict,
+        context: QgsProcessingContext,
+        feedback: QgsProcessingFeedback,
+    ) -> List[str]:
+        """Resolve writable output directories from command input parameters."""
+        dirs: List[str] = []
+        seen = set()
+
+        for inp in self._inputs:
+            param_type = str(inp.get('param_type', 'string')).lower()
+            readonly = inp.get('readonly', True)
+            if readonly or param_type not in ('file', 'folder'):
+                continue
+
+            name = inp.get('name')
+            if not name or name not in parameters:
+                continue
+
+            value = parameters.get(name)
+            if value is None:
+                continue
+
+            if hasattr(value, 'source'):
+                value = value.source()
+            elif hasattr(value, 'dataProvider'):
+                value = value.dataProvider().dataSourceUri()
+
+            path_text = str(value).strip()
+            if not path_text:
+                continue
+
+            if param_type == 'file':
+                # Use the parent directory for writable file targets.
+                if path_text.startswith("file://"):
+                    path_text = QUrl(path_text).toLocalFile() or path_text
+                folder = os.path.dirname(path_text)
+                if not folder:
+                    feedback.pushInfo(f"Skipping output file input '{name}' with no parent directory: {path_text}")
+                    continue
+                normalized = os.path.realpath(folder)
+            else:
+                normalized = self._normalize_local_dir_path(path_text) or os.path.realpath(path_text)
+
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            dirs.append(normalized)
+
+        return dirs
+
     def processAlgorithm(
         self,
         parameters: Dict,
@@ -332,26 +711,83 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         client = GeoEngineCLIClient()
 
         inputs = {}
+        preloaded_project_paths = self._project_loaded_file_paths()
+        temp_export_dirs: List[str] = []
+        temp_export_input_paths: set = set()
         for inp in self._inputs:
             name = inp['name']
             if name in parameters:
-                value = parameters[name]
-                if hasattr(value, 'source'):
-                    value = value.source()
-                elif hasattr(value, 'dataProvider'):
-                    value = value.dataProvider().dataSourceUri()
+                param_type = inp.get('param_type', 'string')
+                readonly = inp.get('readonly', True)
+                if param_type == 'file' and readonly:
+                    resolved = self._resolve_readonly_file_input(name, parameters, context, feedback)
+                    value = resolved.get("path")
+                    if resolved.get("temp_dir"):
+                        temp_export_dirs.append(str(resolved["temp_dir"]))
+                    if resolved.get("exported_temp") and value:
+                        normalized = self._normalize_local_file_path(str(value))
+                        temp_export_input_paths.add(normalized or str(value))
+                else:
+                    value = parameters[name]
+                    if hasattr(value, 'source'):
+                        value = value.source()
+                    elif hasattr(value, 'dataProvider'):
+                        value = value.dataProvider().dataSourceUri()
                 inputs[name] = str(value) if value is not None else None
 
         feedback.pushInfo(f"Running worker '{self._worker}'...")
-
-        result = client.run_tool(
-            worker=self._worker,
-            inputs=inputs,
-            on_output=lambda line: feedback.pushInfo(line),
-            is_cancelled=lambda: feedback.isCanceled(),
+        open_output_folder = self._parameter_bool(
+            parameters,
+            self.OPEN_OUTPUT_FOLDER_PARAM,
+            default=False,
         )
+        requested_output_dirs = self._output_dirs_from_parameters(parameters, context, feedback)
 
-        feedback.pushInfo("Worker completed successfully!")
-        feedback.setProgress(100)
+        try:
+            result = client.run_tool(
+                worker=self._worker,
+                inputs=inputs,
+                on_output=lambda line: feedback.pushInfo(line),
+                is_cancelled=lambda: feedback.isCanceled(),
+            )
 
-        return {'status': result.get('status', 'completed')}
+            feedback.pushInfo("Worker completed successfully!")
+            feedback.setProgress(100)
+
+            raw_file_entries = self._result_file_entries(result)
+            file_entries = []
+            for entry in raw_file_entries:
+                path = entry.get('path')
+                kind = entry.get('kind', 'output')
+                normalized = self._normalize_local_file_path(path or "") or str(path or "")
+                if kind == 'input' and normalized in temp_export_input_paths:
+                    # Temp export is an internal bridge for non-file-backed layers.
+                    continue
+                file_entries.append(entry)
+
+            loaded_paths = []
+            for entry in file_entries:
+                path = entry.get('path')
+                kind = entry.get('kind', 'output')
+                normalized = self._normalize_local_file_path(path or "")
+                if kind == 'input' and normalized and normalized in preloaded_project_paths:
+                    feedback.pushInfo(f"Input layer already loaded in project: {path}")
+                    continue
+                loaded_type = self._try_load_output_layer(path)
+                if loaded_type:
+                    loaded_paths.append(path)
+                    feedback.pushInfo(f"Loaded {loaded_type} {kind} layer: {path}")
+                else:
+                    feedback.pushInfo(f"{kind.title()} file produced (not auto-loaded): {path}")
+
+            self._maybe_open_output_folder(requested_output_dirs, feedback, open_output_folder)
+
+            response: Dict[str, Any] = {'status': result.get('status', 'completed')}
+            if file_entries:
+                response['files'] = [entry.get('path') for entry in file_entries if entry.get('path')]
+            if loaded_paths:
+                response['loaded_files'] = loaded_paths
+            return response
+        finally:
+            for temp_dir in temp_export_dirs:
+                shutil.rmtree(temp_dir, ignore_errors=True)

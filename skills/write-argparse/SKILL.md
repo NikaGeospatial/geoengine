@@ -39,6 +39,21 @@ description: Adding CLI argument parsing to a user's script so that GeoEngine ca
 If any of those patterns are found, **stop**. Do not duplicate or overwrite the
 existing parser.
 
+### Writing Rules
+When writing the parser, do **NOT** edit ANY of the existing code. You are only allowed
+to at most:
+- Indent code to wrap them within a function if they fall outside of function definitions.
+- Add new lines for the argparser.
+
+Do **NOT**:
+- Change any comments nor docstrings.
+- Change any function definitions.
+- Change any existing function code.
+
+And if the user's code has any issues, for example code that required you to wrap them in
+functions as they exist outside of functions, inform the user at the end of the entire process
+about what you changed.
+
 ---
 
 ## 2. Finding the Main Function

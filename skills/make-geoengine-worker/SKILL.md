@@ -27,8 +27,9 @@ project in a specific directory.
 6. Run `geoengine apply` to save/validate `geoengine.yaml` and generate the
    Dockerfile.
    - If prompted to install any plugin, choose `yes`.
-7. Run `geoengine build --dev` to create a development build without strict
-   versioning requirements.
+7. Run `geoengine build --dev --verbose` to create a development build without strict
+   versioning requirements, and include verbose output for monitoring build
+   progress.
 8. Report completion and give the user the follow-up commands/reminders from
    the "Completion Message" section below.
 

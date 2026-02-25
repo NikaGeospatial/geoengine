@@ -3,6 +3,7 @@ use bollard::container::{Config, CreateContainerOptions, LogsOptions, StartConta
 use bollard::image::{BuildImageOptions, BuilderVersion, CreateImageOptions, ImportImageOptions, TagImageOptions};
 use bollard::Docker;
 use futures::StreamExt;
+use libc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
@@ -500,6 +501,10 @@ impl DockerClient {
             }
         }
 
+        // Inject host UID:GID so the container process owns its bind-mounted directories
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+
         let container_config = Config {
             image: Some(config.image.clone()),
             cmd: config.command.clone(),
@@ -509,6 +514,7 @@ impl DockerClient {
             attach_stdin: Some(!config.detach),
             attach_stdout: Some(!config.detach),
             attach_stderr: Some(!config.detach),
+            user: Some(format!("{}:{}", uid, gid)),
             host_config: Some(host_config),
             ..Default::default()
         };
