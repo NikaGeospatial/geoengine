@@ -239,8 +239,6 @@ impl DockerClient {
             cmd.args(["--build-arg", &format!("{}={}", k, v)]);
         }
 
-        cmd.arg(context.as_os_str());
-
         if verbose {
             cmd.args(["--progress", "plain"]);
             // Inherit stdout/stderr so output flows directly to the terminal
@@ -251,6 +249,8 @@ impl DockerClient {
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::piped());
         }
+
+        cmd.arg(context.as_os_str());
 
         // Convert to tokio::process::Command so we don't block the async runtime
         // during what can be a multi-minute build.
