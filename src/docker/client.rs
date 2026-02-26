@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bollard::container::{Config, CreateContainerOptions, LogsOptions, StartContainerOptions, WaitContainerOptions};
-use bollard::image::{BuildImageOptions, BuilderVersion, CreateImageOptions, ImportImageOptions, TagImageOptions};
+use bollard::image::{CreateImageOptions, ImportImageOptions, TagImageOptions};
 use bollard::Docker;
 use futures::StreamExt;
 #[cfg(unix)]
@@ -227,79 +227,60 @@ impl DockerClient {
         no_cache: bool,
         verbose: bool,
     ) -> Result<()> {
-        // Create tar archive of context
-        let tar_path = std::env::temp_dir().join(format!("geoengine-build-{}-{}.tar", std::process::id(), chrono::Utc::now().timestamp()));
+        let mut cmd = std::process::Command::new("docker");
+        cmd.args(["build", "-t", tag, "-f", dockerfile.to_str().unwrap()]);
 
-        // Use tar command to create archive
-        let status = std::process::Command::new("tar")
-            .args(["--no-xattrs", "-cf", tar_path.to_str().unwrap(), "-C", context.to_str().unwrap(), "."])
-            .status()
-            .context("Failed to create build context tar")?;
-
-        if !status.success() {
-            anyhow::bail!("Failed to create build context");
+        if no_cache {
+            cmd.arg("--no-cache");
         }
 
-        let tar_contents = tokio::fs::read(&tar_path).await?;
-        tokio::fs::remove_file(&tar_path).await.ok();
+        for (k, v) in build_args {
+            cmd.args(["--build-arg", &format!("{}={}", k, v)]);
+        }
 
-        let dockerfile_rel = dockerfile
-            .strip_prefix(context)
-            .unwrap_or(dockerfile)
-            .to_str()
-            .unwrap_or("Dockerfile");
+        cmd.arg(context.to_str().unwrap());
 
-        let options = BuildImageOptions {
-            t: tag,
-            dockerfile: dockerfile_rel,
-            nocache: no_cache,
-            buildargs: build_args.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
-            rm: true,
-            version: BuilderVersion::BuilderBuildKit,
-            session: Some(format!(
-                "geoengine-buildkit-{}-{}",
-                std::process::id(),
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-            )),
-            ..Default::default()
+        if verbose {
+            cmd.args(["--progress", "plain"]);
+            // Inherit stdout/stderr so output flows directly to the terminal
+            cmd.stdout(std::process::Stdio::inherit());
+            cmd.stderr(std::process::Stdio::inherit());
+        } else {
+            // Suppress output — caller shows a spinner
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::piped());
+        }
+
+        // Convert to tokio::process::Command so we don't block the async runtime
+        // during what can be a multi-minute build.
+        let mut cmd: tokio::process::Command = cmd.into();
+
+        let mut child = cmd.spawn().context("Failed to spawn `docker build`")?;
+
+        // Capture stderr when not verbose so we can surface it on failure.
+        // Reading stderr to completion before wait() drains the pipe and prevents
+        // the child from blocking on a full buffer.
+        let stderr_output = if !verbose {
+            let stderr = child.stderr.take();
+            if let Some(stderr) = stderr {
+                use tokio::io::AsyncReadExt;
+                let mut buf = String::new();
+                tokio::io::BufReader::new(stderr).read_to_string(&mut buf).await.ok();
+                buf
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
         };
 
-        let mut stream = self.docker.build_image(options, None, Some(tar_contents.into()));
+        let status = child.wait().await.context("`docker build` process failed")?;
 
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(info) => {
-                    if let Some(stream) = info.stream {
-                        let msg = stream.trim();
-                        if !msg.is_empty() {
-                            if verbose {
-                                println!("{}", msg);
-                            } else {
-                                tracing::info!("{}", msg);
-                            }
-                        }
-                    }
-                    if verbose {
-                        if let Some(status) = info.status {
-                            let progress = info.progress.unwrap_or_default();
-                            let id = info.id.unwrap_or_default();
-                            let line = [status, id, progress]
-                                .into_iter()
-                                .filter(|s| !s.trim().is_empty())
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            if !line.is_empty() {
-                                println!("{}", line);
-                            }
-                        }
-                    }
-                    if let Some(error) = info.error {
-                        return Err(anyhow::anyhow!("Build failed: {}", error));
-                    }
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Build failed: {}", e));
-                }
+        if !status.success() {
+            if stderr_output.is_empty() {
+                anyhow::bail!("Build failed (exit code {:?}). Re-run with --verbose for details.", status.code());
+            } else {
+                anyhow::bail!("Build failed:\n{}", stderr_output.trim());
             }
         }
 
