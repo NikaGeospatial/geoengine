@@ -10,6 +10,9 @@ use crate::utils::paths;
 pub struct WorkerState {
     pub worker_name: String,
     pub applied_at: String,
+    /// RFC3339 timestamp of the last successful `geoengine build`
+    #[serde(default)]
+    pub built_at: Option<String>,
     /// SHA-256 of build-relevant config fields (name, version, command, local_dir_mounts)
     pub yaml_build_hash: String,
     /// SHA-256 of full geoengine.yaml contents (if present)

@@ -68,6 +68,11 @@ pub struct InputParameter {
     /// Mark as readonly (only for types folder and file, defaults to true)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readonly: Option<bool>,
+
+    /// Accepted file extensions (only for type: file). Each entry must start with '.'
+    /// (e.g., [".tif", ".geotiff"]). Omit or set to [".*"] to accept all file types.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filetypes: Option<Vec<String>>,
 }
 
 /// Volume mount configuration
@@ -143,6 +148,7 @@ impl WorkerConfig {
                         description: Some("Input file to process".to_string()),
                         enum_values: None,
                         readonly: Some(true),
+                        filetypes: None,
                     },
                     InputParameter {
                         name: "output_folder".to_string(),
@@ -152,6 +158,7 @@ impl WorkerConfig {
                         description: Some("Output folder for results".to_string()),
                         enum_values: None,
                         readonly: Some(false),
+                        filetypes: None,
                     },
                     InputParameter {
                         name: "format".to_string(),
@@ -165,6 +172,7 @@ impl WorkerConfig {
                             "jpeg".to_string(),
                         ]),
                         readonly: None,
+                        filetypes: None,
                     },
                 ]),
             }),

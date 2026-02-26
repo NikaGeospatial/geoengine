@@ -66,17 +66,34 @@ class GeoEnginePlugin:
             if os.path.exists(path):
                 self._watcher.addPath(path)
 
+    def _refresh_processing_toolbox_providers(self):
+        """Refresh QGIS built-in Processing providers used by the toolbox."""
+        reg = QgsApplication.processingRegistry()
+        for pid in ('script', 'model'):
+            provider = reg.providerById(pid)
+            if provider:
+                provider.refreshAlgorithms()
+
+    def _refresh_geoengine_provider(self):
+        """Force QGIS to rebuild this plugin provider's algorithm list."""
+        if self.provider:
+            self.provider.refreshAlgorithms()
+
     def _do_silent_refresh(self):
         """Reload algorithms without any dialog popups."""
         if self.provider:
             QgsApplication.processingRegistry().removeProvider(self.provider)
             self.provider = GeoEngineProvider()
             QgsApplication.processingRegistry().addProvider(self.provider)
+            self._refresh_geoengine_provider()
+        self._refresh_processing_toolbox_providers()
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
         # Initialize processing provider
         self.initProcessing()
+        self._refresh_geoengine_provider()
+        self._refresh_processing_toolbox_providers()
 
         # Start watching for external refresh triggers
         self._setup_file_watcher()

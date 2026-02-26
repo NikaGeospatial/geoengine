@@ -116,13 +116,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   update-homebrew:
-    name: Update Homebrew Formula
+    name: Update Homebrew Tap
     needs: release
     runs-on: ubuntu-latest
     if: ${{ !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc') }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -132,15 +133,43 @@ jobs:
       - name: Calculate SHA256
         id: sha
         run: |
-          echo "darwin_x86_64=$(shasum -a 256 artifacts/geoengine-darwin-x86_64/geoengine-darwin-x86_64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "darwin_x86_64=$(shasum  -a 256 artifacts/geoengine-darwin-x86_64/geoengine-darwin-x86_64.tar.gz   | cut -d' ' -f1)" >> $GITHUB_OUTPUT
           echo "darwin_aarch64=$(shasum -a 256 artifacts/geoengine-darwin-aarch64/geoengine-darwin-aarch64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-          echo "linux_x86_64=$(shasum -a 256 artifacts/geoengine-linux-x86_64/geoengine-linux-x86_64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-          echo "linux_aarch64=$(shasum -a 256 artifacts/geoengine-linux-aarch64/geoengine-linux-aarch64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "linux_x86_64=$(shasum   -a 256 artifacts/geoengine-linux-x86_64/geoengine-linux-x86_64.tar.gz     | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "linux_aarch64=$(shasum  -a 256 artifacts/geoengine-linux-aarch64/geoengine-linux-aarch64.tar.gz   | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
-      - name: Print SHA256 values
+      - name: Checkout homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: NikaGeospatial/homebrew-geoengine
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-geoengine
+
+      - name: Update formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DARWIN_X86_64: ${{ steps.sha.outputs.darwin_x86_64 }}
+          DARWIN_AARCH64: ${{ steps.sha.outputs.darwin_aarch64 }}
+          LINUX_X86_64: ${{ steps.sha.outputs.linux_x86_64 }}
+          LINUX_AARCH64: ${{ steps.sha.outputs.linux_aarch64 }}
         run: |
-          echo "Update install/geoengine.rb with these SHA256 values:"
-          echo "  darwin-x86_64:  ${{ steps.sha.outputs.darwin_x86_64 }}"
-          echo "  darwin-aarch64: ${{ steps.sha.outputs.darwin_aarch64 }}"
-          echo "  linux-x86_64:   ${{ steps.sha.outputs.linux_x86_64 }}"
-          echo "  linux-aarch64:  ${{ steps.sha.outputs.linux_aarch64 }}"
+          FORMULA="homebrew-geoengine/Formula/geoengine.rb"
+
+          # Update version
+          sed -i "s/version \"[^\"]*\"/version \"${VERSION}\"/" "$FORMULA"
+
+          # Update SHA256 values: match the URL line then replace sha256 on the next line
+          sed -i "/geoengine-darwin-x86_64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${DARWIN_X86_64}\"/;}" "$FORMULA"
+          sed -i "/geoengine-darwin-aarch64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${DARWIN_AARCH64}\"/;}" "$FORMULA"
+          sed -i "/geoengine-linux-x86_64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${LINUX_X86_64}\"/;}" "$FORMULA"
+          sed -i "/geoengine-linux-aarch64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${LINUX_AARCH64}\"/;}" "$FORMULA"
+
+      - name: Commit and push
+        run: |
+          cd homebrew-geoengine
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/geoengine.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "geoengine ${{ steps.version.outputs.version }}"
+          git push

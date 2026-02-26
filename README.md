@@ -98,19 +98,19 @@ The command is run in the current directory by default. It runs the latest produ
 
 ```bash
 # Run the worker defined in the current directory using latest production image
-geoengine run --input input_file=/path/to/image.tif --input model=resnet50
+geoengine run --input input-file=/path/to/image.tif --input model=resnet50
 
 # Run the latest dev image (built using `geoengine build --dev`)
-geoengine run --dev --input input_file=/path/to/image.tif --input model=resnet50
+geoengine run --dev --input input-file=/path/to/image.tif --input model=resnet50
 
 # Run a named worker using its latest production image
-geoengine run my-worker --input input_file=/path/to/image.tif
+geoengine run my-worker --input input-file=/path/to/image.tif
 
 # JSON output mode (logs go to stderr, structured result on stdout)
-geoengine run my-worker --json --input input_file=/path/to/image.tif
+geoengine run my-worker --json --input input-file=/path/to/image.tif
 
 # Pass extra arguments to the container command (after trailing --)
-geoengine run my-worker --input input_file=/data.tif -- --extra-flag value
+geoengine run my-worker --input input-file=/data.tif -- --extra-flag value
 ```
 
 **Input mapping (quick):**
@@ -150,13 +150,13 @@ the file is part of the input or the output, as input files are also passed into
 geoengine diff
 
 # Check only the geoengine.yaml configuration
-geoengine diff --file yaml
+geoengine diff --file config
 
 # Check only the Dockerfile
-geoengine diff --file docker
+geoengine diff --file dockerfile
 
-# Check only the command script (e.g. main.py)
-geoengine diff --file command
+# Check only the worker directory
+geoengine diff --file worker
 
 # Equivalent to no --file flag
 geoengine diff --file all
@@ -183,6 +183,35 @@ geoengine delete --name my-worker
 # Delete the worker in the current directory
 geoengine delete
 ```
+
+### Patch GeoEngine Artifacts
+
+`geoengine patch` performs a maintenance sweep across all GeoEngine-managed artifacts. Run it after upgrading GeoEngine to bring existing workers and plugins up to date automatically.
+
+```bash
+geoengine patch
+```
+
+It checks and repairs the following:
+
+**Global artifacts (`~/.geoengine/`)**
+- `settings.yaml` — validates that it parses correctly
+- `state/*.yaml` — validates each state file and warns about orphaned entries (no matching registered worker)
+- `configs/*.json` — validates each saved config and warns about orphaned entries
+
+**Per registered worker**
+- Worker path — warns if the registered path no longer exists on disk
+- `geoengine.yaml` — validates schema (read-only, never modified)
+- `pixi.toml` — warns if missing (read-only, never modified)
+- `Dockerfile` and `.dockerignore` — compares content against the current canonical template; silently regenerates if stale or missing
+
+**GIS plugins**
+- Hashes each installed plugin file against the canonical version embedded in the GeoEngine binary
+- If all files match: reports up-to-date
+- If any file is stale or missing: reinstalls the plugin automatically
+- If the GIS application is not installed on the machine: skips that plugin check entirely
+
+The command exits with a non-zero status if any validation issue is found (parse errors, missing paths, reinstall failures), making it safe to use in scripts.
 
 ### Image Management
 
@@ -225,8 +254,8 @@ The following situations will throw errors when attempting to rebuild.
 2. The version number in `geoengine.yaml` is lower than the current image version.
 3. The version number in `geoengine.yaml` is invalid.
 
-A valid SemVer version string must be of the form `MAJOR.MINOR.PATCH`, without missing any parameters.
-Ensure to follow versioning rules accordingly to avoid unexpected errors!
+A valid SemVer version string must include all three components: `MAJOR.MINOR.PATCH`.
+Follow versioning rules to avoid unexpected errors.
 
 
 ## Worker Configuration
@@ -242,12 +271,15 @@ command:
   program: python
   script: main.py
   inputs:
-    - name: input_file
+    - name: input-file
       type: file
       required: true
       description: "Input satellite image to classify"
+      filetypes:
+        - .tif
+        - .tiff
 
-    - name: output_folder
+    - name: output-folder
       type: folder
       required: true
       description: "Output folder for classification results"
@@ -331,6 +363,7 @@ Refer to the [Pixi manifest documentation](https://pixi.prefix.dev/latest/refere
 | `description` | String | No | `null`  | Help text                                                              |
 | `enum_values` | Array | No | `null`  | Valid choices (for `enum` type)                                        |
 | `readonly` | Boolean | No | `true`  | ONLY for file/folder types. Set to `false` for output file/folder paths that the worker writes to. |
+| `filetypes` | Array | No | `null`  | ONLY for `file` type. List of file extensions (e.g., `[".tif", ".geotiff"]`). For input files (`readonly: true`) these are the accepted input formats; for output files (`readonly: false`) these are the formats the script produces. Omit or use `[".*"]` for no restriction. `geoengine run` validates the extension before mounting. |
 
 **Supported Input Types:**
 
@@ -390,6 +423,7 @@ Refer to the [Pixi manifest documentation](https://pixi.prefix.dev/latest/refere
 
 How it works:
 - Plugins are installed by `geoengine apply` based on the `plugins` section in `geoengine.yaml` if not already installed
+- Run `geoengine patch` after a GeoEngine upgrade to automatically reinstall any stale plugin files
 - **Discovery**: Plugins call `geoengine workers --json` to list workers, then `geoengine describe <worker> --json` to get each worker's parameter definitions as JSON
 - **Execution**: Plugins invoke `geoengine run <worker> --json --input KEY=VALUE` as a subprocess
 - Container logs stream to stderr in real-time (displayed as progress in the GIS UI)
@@ -430,10 +464,11 @@ CUDA is not available on macOS. PyTorch will automatically use the MPS (Metal) b
 | `geoengine apply [<worker>]`                                   | Register worker, generate Dockerfile if missing, save config, and manage GIS plugins        |
 | `geoengine build [--no-cache] [--dev] [--build-arg KEY=VALUE]` | Build the Docker image (with file change detection and version enforcement in non-dev mode) |
 | `geoengine run [<worker>] --input KEY=VALUE [--json] [--dev]`  | Run a worker's command                                                                      |
-| `geoengine diff [--file all\|yaml\|docker\|command]`           | Check which tracked files have changed since last apply                                     |
+| `geoengine diff [--file all\|config\|dockerfile\|worker]`      | Check which tracked files have changed since last apply                                     |
 | `geoengine delete [--name <worker>]`                           | Delete a worker, clean up state and saved configuration                                     |
 | `geoengine workers [--json] [--gis arcgis\|qgis]`              | List registered workers                                                                     |
 | `geoengine describe [<worker>] [--json]`                       | Displays information from saved configuration file of specified worker                      |
+| `geoengine patch`                                              | Validate all artifacts and reinstall stale Dockerfiles and GIS plugins                      |
 | `geoengine image list\|import\|remove`                         | Manage Docker images                                                                        |
 | `geoengine deploy auth\|push\|pull\|list`                      | GCP Artifact Registry operations                                                            |
 
@@ -442,15 +477,62 @@ AI Agents are able to assist users in automatically deploying workers from scrip
 defined in the `skills` folder. They contain `SKILL.md` files with instructions on how to operate certain parts of the workflow.
 In order to use AI Agents, refer to the respective sections below.
 
+### Available Skills
+
+| Skill | Description |
+|-------|-------------|
+| `use-geoengine` | Master routing skill — handles any GeoEngine request and routes to the correct sub-skill or CLI command |
+| `make-geoengine-worker` | End-to-end workflow for creating a new GeoEngine worker from scratch |
+| `write-geoengine-yaml` | Writes or updates the `geoengine.yaml` configuration file for a worker |
+| `write-argparse` | Adds CLI argument parsing to a script so GeoEngine can pass `--name value` flags at runtime |
+| `write-pixi-toml` | Writes or updates the `pixi.toml` dependency file for a worker |
+
 ### Activating Skills
-To activate a skill, copy the contents of the `/skills` folder into the respective skills folder of the agent:
-- Claude: `~/.claude/skills`
-- Codex: `~/.codex/skills`
+
+**Option A — Clone the full repo and copy the skills folder:**
+
+```bash
+# macOS / Linux / WSL2
+git clone https://github.com/NikaGeospatial/geoengine.git
+cp -r geoengine/skills/* ~/.claude/skills/   # Claude Code
+# cp -r geoengine/skills/* ~/.codex/skills/  # OpenAI Codex
+```
+
+```powershell
+# Windows (PowerShell)
+git clone https://github.com/NikaGeospatial/geoengine.git
+Copy-Item -Recurse geoengine\skills\* "$env:USERPROFILE\.claude\skills\"   # Claude Code
+# Copy-Item -Recurse geoengine\skills\* "$env:USERPROFILE\.codex\skills\"  # OpenAI Codex
+```
+
+**Option B — Download only the `skills` folder (sparse checkout, no full clone):**
+
+```bash
+# macOS / Linux / WSL2
+git clone --filter=blob:none --sparse https://github.com/NikaGeospatial/geoengine.git
+cd geoengine
+git sparse-checkout set skills
+cp -r skills/* ~/.claude/skills/   # Claude Code
+# cp -r skills/* ~/.codex/skills/  # OpenAI Codex
+```
+
+```powershell
+# Windows (PowerShell)
+git clone --filter=blob:none --sparse https://github.com/NikaGeospatial/geoengine.git
+cd geoengine
+git sparse-checkout set skills
+Copy-Item -Recurse skills\* "$env:USERPROFILE\.claude\skills\"   # Claude Code
+# Copy-Item -Recurse skills\* "$env:USERPROFILE\.codex\skills\"  # OpenAI Codex
+```
+
+> The skills directories must exist before copying. Create them if needed:
+> - **macOS/Linux:** `mkdir -p ~/.claude/skills` or `mkdir -p ~/.codex/skills`
+> - **Windows:** `New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills"`
 
 ### Using Skills
 After copying the folder, the skills should be made available to the agent. Allow the agent access to the directory that
 contains your script, then prompt the agent your needs. For example (in `examples/synthetic-hotspot-analysis`):
-```aiignore
+```
 Make the function `run_hotspot_analysis_from_files()` from `hotspot_analysis.py` a GeoEngine worker.
 ```
 The agent will then run the whole process stipulated above automatically, even creating an argument parser if not already available

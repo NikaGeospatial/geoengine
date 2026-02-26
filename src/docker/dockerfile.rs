@@ -78,6 +78,55 @@ fn generate_dockerignore(ignorefile: &mut File) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Returns the canonical Dockerfile content that GeoEngine generates.
+/// Used by `geoengine patch` to detect stale Dockerfiles.
+pub fn canonical_dockerfile_content() -> String {
+    let mut out = String::new();
+    out.push_str("FROM ghcr.io/prefix-dev/pixi:0.41.4 AS build\n\n");
+    out.push_str("WORKDIR /pixi\n\n");
+    out.push_str("COPY pixi.toml ./\n\n");
+    out.push_str("RUN pixi install\n\n");
+    out.push_str("RUN pixi shell-hook -s bash > /shell-hook\n\n");
+    out.push_str("RUN echo '#!/bin/bash' > /pixi/entrypoint.sh && \\\n");
+    out.push_str("\tcat /shell-hook >> /pixi/entrypoint.sh && \\\n");
+    out.push_str("\techo 'exec \"$@\"' >> /pixi/entrypoint.sh\n\n");
+    out.push_str("FROM ubuntu:24.04 AS final\n\n");
+    out.push_str("RUN apt-get update && apt-get install -y --no-install-recommends \\\n");
+    out.push_str("\tca-certificates \\\n");
+    out.push_str("\tcurl \\\n");
+    out.push_str("\tgit \\\n");
+    out.push_str("\t&& rm -rf /var/lib/apt/lists/*\n\n");
+    out.push_str("COPY --from=build /pixi/.pixi/envs/default /pixi/.pixi/envs/default\n");
+    out.push_str("COPY --from=build --chmod=0755 /pixi/entrypoint.sh /pixi/entrypoint.sh\n");
+    out.push_str("COPY --from=build /pixi/pixi.toml /pixi/pixi.toml\n\n");
+    out.push_str("WORKDIR /app\n\n");
+    out.push_str("COPY . /app\n\n");
+    out.push_str("RUN useradd -m worker && chown -R worker:worker /app\n\n");
+    out.push_str("ENV PATH=\"/pixi/.pixi/envs/default/bin:${PATH}\"\n");
+    out.push_str("ENV GDAL_DATA=\"/pixi/.pixi/envs/default/share/gdal\"\n");
+    out.push_str("ENV PROJ_LIB=\"/pixi/.pixi/envs/default/share/proj\"\n\n");
+    out.push_str("ENV PYTHONUNBUFFERED=\"1\"\n\n");
+    out.push_str("ENTRYPOINT [\"/pixi/entrypoint.sh\"]\n");
+    out
+}
+
+/// Returns the canonical .dockerignore content that GeoEngine generates.
+/// Used by `geoengine patch` to detect stale .dockerignore files.
+pub fn canonical_dockerignore_content() -> String {
+    let ignorables = [
+        "geoengine.yaml",
+        "Dockerfile",
+        ".venv",
+        ".idea",
+        ".pixi",
+        "__pycache__",
+        "*.pyc",
+        "*.pyo",
+        ".pytest_cache",
+    ];
+    ignorables.iter().map(|s| format!("{}\n", s)).collect()
+}
+
 pub fn generate_dockerfile(path: &PathBuf) -> anyhow::Result<()> {
     let docker_path = Path::new(path).join("Dockerfile");
     let mut dockerfile = File::create(docker_path)?;

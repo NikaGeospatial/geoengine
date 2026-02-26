@@ -1,5 +1,6 @@
 pub mod deploy;
 pub mod image;
+pub mod patch;
 pub mod plugins;
 pub mod worker;
 
@@ -128,8 +129,8 @@ enum Commands {
         command: deploy::DeployCommands,
     },
 
-    /// Debug helper: install the QGIS plugin only if not already installed
-    DebugQgis,
+    /// Validate and patch all GeoEngine artifacts and registered workers
+    Patch,
 }
 
 impl Cli {
@@ -161,7 +162,7 @@ impl Cli {
             Commands::Describe { worker, json } => worker::describe_worker(worker.as_deref(), json).await,
             Commands::Diff { file } => worker::diff_worker(file.as_deref()).await,
             Commands::Deploy { command } => command.execute().await,
-            Commands::DebugQgis => plugins::debug_qgis().await,
+            Commands::Patch => patch::patch_all().await,
         }
     }
 }

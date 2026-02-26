@@ -24,6 +24,8 @@ from qgis.core import (
     QgsProcessingParameterNumber,
     QgsProcessingParameterBoolean,
     QgsProcessingParameterFile,
+    QgsProcessingParameterFileDestination,
+    QgsProcessingParameterFolderDestination,
     QgsProcessingParameterEnum,
     QgsProcessingProvider,
     QgsProject,
@@ -64,24 +66,94 @@ class GeoEngineCLIClient:
 
     @staticmethod
     def _find_binary() -> str:
-        """Locate the geoengine binary."""
-        current_path = os.environ.get("PATH", "")
-        search_path = current_path
-        if "/usr/local/bin" not in current_path:
-            search_path = current_path + ":/usr/local/bin"
-        path = shutil.which('geoengine', path=search_path)
-        if path:
-            if search_path != current_path:
-                os.environ["PATH"] = search_path
-            return path
+        """Locate the geoengine binary across platforms.
 
+        QGIS launched as a GUI app (e.g. from the macOS dock or Windows start
+        menu) inherits a minimal PATH that often omits the directories where
+        package managers and Cargo install binaries.  This method tries a broad
+        set of well-known locations before giving up.
+        """
+        import platform
+        is_windows = platform.system() == "Windows"
+        binary_name = "geoengine.exe" if is_windows else "geoengine"
+
+        # --- 1. Augment PATH with common install locations and try shutil.which ---
+        extra_dirs: List[str] = []
         home = os.path.expanduser('~')
-        for candidate in [
-            os.path.join(home, '.geoengine', 'bin', 'geoengine'),
-            os.path.join(home, '.cargo', 'bin', 'geoengine')
-        ]:
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
+
+        if is_windows:
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+            program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+            extra_dirs = [
+                os.path.join(home, '.geoengine', 'bin'),
+                os.path.join(home, '.cargo', 'bin'),
+                os.path.join(local_app_data, 'Programs', 'geoengine', 'bin') if local_app_data else '',
+                os.path.join(program_files, 'GeoEngine', 'bin'),
+                os.path.join(program_files_x86, 'GeoEngine', 'bin'),
+            ]
+        else:
+            extra_dirs = [
+                os.path.join(home, '.geoengine', 'bin'),
+                os.path.join(home, '.cargo', 'bin'),
+                '/usr/local/bin',
+                '/usr/bin',
+                '/opt/homebrew/bin',
+                '/opt/homebrew/sbin',
+                '/opt/local/bin',
+                '/snap/bin',
+            ]
+
+        current_path = os.environ.get("PATH", "")
+        path_sep = ";" if is_windows else ":"
+        path_parts = current_path.split(path_sep) if current_path else []
+        augmented_parts = list(path_parts)
+        for d in extra_dirs:
+            if d and d not in augmented_parts:
+                augmented_parts.append(d)
+        augmented_path = path_sep.join(augmented_parts)
+
+        found = shutil.which(binary_name, path=augmented_path)
+        if not found and not is_windows:
+            # shutil.which on some systems won't find "geoengine.exe"-less names
+            found = shutil.which('geoengine', path=augmented_path)
+        if found:
+            # Persist the augmented PATH so subprocess calls inherit it too.
+            os.environ["PATH"] = augmented_path
+            return found
+
+        # --- 2. Direct filesystem probe for well-known absolute paths ---
+        candidates: List[str] = []
+        if is_windows:
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+            program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+            candidates = [
+                os.path.join(home, '.geoengine', 'bin', 'geoengine.exe'),
+                os.path.join(home, '.cargo', 'bin', 'geoengine.exe'),
+                os.path.join(local_app_data, 'Programs', 'geoengine', 'bin', 'geoengine.exe') if local_app_data else '',
+                os.path.join(program_files, 'GeoEngine', 'bin', 'geoengine.exe'),
+                os.path.join(program_files_x86, 'GeoEngine', 'bin', 'geoengine.exe'),
+            ]
+        else:
+            candidates = [
+                os.path.join(home, '.geoengine', 'bin', 'geoengine'),
+                os.path.join(home, '.cargo', 'bin', 'geoengine'),
+                '/usr/local/bin/geoengine',
+                '/opt/homebrew/bin/geoengine',
+                '/opt/local/bin/geoengine',
+                '/snap/bin/geoengine',
+            ]
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if is_windows:
+                if os.path.isfile(candidate):
+                    return candidate
+            else:
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    return candidate
 
         raise FileNotFoundError(
             "geoengine binary not found. "
@@ -287,8 +359,64 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         return ''
 
     def shortHelpString(self) -> str:
-        """Return help text sourced from the worker description."""
-        return self._tool.get('description', '')
+        """Return help text sourced from the worker description, with apply/build metadata."""
+        parts = []
+
+        description = self._tool.get('description', '')
+        if description:
+            parts.append(description)
+
+        applied_at = self._tool.get('applied_at')
+        built_at = self._tool.get('built_at')
+        yaml_hash = self._tool.get('yaml_hash')
+        script_hash = self._tool.get('script_hash')
+
+        parts.append("\n--------------\n")
+        apply_block = []
+        if yaml_hash:
+            apply_block.append(f"Saved YAML hash: {yaml_hash}...")
+        if applied_at:
+            apply_block.append(f"Last applied {self._format_age(applied_at)}")
+        if apply_block:
+            parts.append("\n".join(apply_block))
+            parts.append("--------------\n")
+
+        build_block = []
+        if script_hash:
+            build_block.append(f"Built script hash: {script_hash}...")
+        if built_at:
+            build_block.append(f"Last built {self._format_age(built_at)}")
+        if build_block:
+            parts.append("\n".join(build_block))
+            parts.append("--------------\n")
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _format_age(iso_ts: str) -> str:
+        """Return a human-readable age string for an RFC3339 timestamp.
+
+        Examples:
+            "45s ago"
+            "3min 12s ago"
+            "over an hour ago"
+        """
+        try:
+            from datetime import datetime, timezone
+            ts = iso_ts.split('.')[0].rstrip('Z')
+            if '+' in ts:
+                ts = ts.split('+')[0]
+            dt_utc = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            delta = max(0, int((now - dt_utc).total_seconds()))
+            if delta >= 3600:
+                return "over an hour ago"
+            minutes, seconds = divmod(delta, 60)
+            if minutes > 0:
+                return f"{minutes}min {seconds}s ago"
+            return f"{seconds}s ago"
+        except Exception:
+            return iso_ts
 
     def initAlgorithm(self, config=None):
         """Define algorithm parameters from worker's input definitions."""
@@ -314,6 +442,14 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         default = param_info.get('default')
         enum_values = param_info.get('enum_values', [])
         readonly = param_info.get('readonly', True)
+        filetypes: List[str] = param_info.get('filetypes') or []
+        # Exclude the wildcard sentinel — an empty list means "all types".
+        filetypes = [ft for ft in filetypes if ft != ".*"]
+        # Build a Qt file-dialog filter string, e.g. "*.tif *.tiff" → "*.tif *.tiff"
+        # QgsProcessingParameterFileDestination expects a filter like "GeoTIFF (*.tif *.tiff)"
+        file_filter = (
+            " ".join(f"*{ft}" for ft in filetypes) if filetypes else ""
+        )
 
         if param_type == 'file':
             if readonly:
@@ -321,11 +457,18 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 # choose an existing layer or browse to an external layer source.
                 param = QgsProcessingParameterMapLayer(name, label, optional=not required)
             else:
-                param = QgsProcessingParameterFile(name, label, optional=not required)
+                param = QgsProcessingParameterFileDestination(
+                    name, label,
+                    fileFilter=file_filter if file_filter else "All files (*.*)",
+                    optional=not required,
+                )
         elif param_type == 'folder':
-            param = QgsProcessingParameterFile(
-                name, label, behavior=QgsProcessingParameterFile.Folder, optional=not required
-            )
+            if readonly:
+                param = QgsProcessingParameterFile(
+                    name, label, behavior=QgsProcessingParameterFile.Folder, optional=not required
+                )
+            else:
+                param = QgsProcessingParameterFolderDestination(name, label, optional=not required)
         elif param_type == 'datetime':
             param = QgsProcessingParameterString(name, label, defaultValue=default, optional=not required)
         elif param_type == 'string':
@@ -665,8 +808,13 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         parameters: Dict,
         context: QgsProcessingContext,
         feedback: QgsProcessingFeedback,
+        resolved_writable_files: Optional[Dict[str, str]] = None,
     ) -> List[str]:
-        """Resolve writable output directories from command input parameters."""
+        """Resolve writable output directories from command input parameters.
+
+        resolved_writable_files: pre-resolved paths for writable file inputs
+        (keyed by input name) so TEMPORARY_OUTPUT is not re-encountered here.
+        """
         dirs: List[str] = []
         seen = set()
 
@@ -680,22 +828,50 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             if not name or name not in parameters:
                 continue
 
-            value = parameters.get(name)
-            if value is None:
-                continue
+            # Use the pre-resolved path for writable file inputs if available,
+            # to avoid re-encountering the raw "TEMPORARY_OUTPUT" sentinel.
+            if resolved_writable_files and name in resolved_writable_files:
+                path_text = resolved_writable_files[name]
+            else:
+                value = parameters.get(name)
+                if value is None:
+                    continue
 
-            if hasattr(value, 'source'):
-                value = value.source()
-            elif hasattr(value, 'dataProvider'):
-                provider = value.dataProvider()
-                if provider is not None:
-                    value = provider.dataSourceUri()
+                if hasattr(value, 'source'):
+                    value = value.source()
+                elif hasattr(value, 'dataProvider'):
+                    provider = value.dataProvider()
+                    if provider is not None:
+                        value = provider.dataSourceUri()
 
-            path_text = str(value).strip()
+                path_text = str(value).strip()
+
             if not path_text:
                 continue
 
             if param_type == 'file':
+                if path_text == "TEMPORARY_OUTPUT":
+                    # Determine the output extension.
+                    # Use filetypes only when exactly one type is declared — if
+                    # multiple are listed we can't know which one the script will
+                    # produce, so fall back to the default value's extension.
+                    # Exclude the wildcard sentinel in all cases.
+                    filetypes = [
+                        ft for ft in (inp.get('filetypes') or []) if ft != ".*"
+                    ]
+                    if len(filetypes) == 1:
+                        suffix = filetypes[0]
+                    else:
+                        suffix = os.path.splitext(str(inp.get('default') or ""))[1]
+                    # Create a temporary *directory* and build a path inside it
+                    # without touching the filesystem. This lets the script create
+                    # the file itself (with the correct format), avoiding the
+                    # mkstemp pitfall where a pre-created file blocks geospatial
+                    # writers (GDAL, fiona, terra, etc.) that refuse to overwrite
+                    # or misinterpret an already-existing empty file.
+                    tmp_dir = tempfile.mkdtemp()
+                    os.chmod(tmp_dir, 0o777)
+                    path_text = os.path.join(tmp_dir, f"output{suffix}")
                 # Use the parent directory for writable file targets.
                 if path_text.startswith("file://"):
                     path_text = QUrl(path_text).toLocalFile() or path_text
@@ -706,7 +882,6 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 normalized = os.path.realpath(folder)
             else:
                 normalized = self._normalize_local_dir_path(path_text) or os.path.realpath(path_text)
-
             if normalized in seen:
                 continue
             seen.add(normalized)
@@ -727,6 +902,11 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         preloaded_project_paths = self._project_loaded_file_paths()
         temp_export_dirs: List[str] = []
         temp_export_input_paths: set = set()
+        # Maps writable file input name -> resolved real path, so that
+        # _output_dirs_from_parameters can use the already-resolved paths
+        # instead of re-reading the raw (possibly "TEMPORARY_OUTPUT") parameter.
+        resolved_writable_file_paths: Dict[str, str] = {}
+
         for inp in self._inputs:
             name = inp['name']
             if name in parameters:
@@ -740,6 +920,29 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                     if resolved.get("exported_temp") and value:
                         normalized = self._normalize_local_file_path(str(value))
                         temp_export_input_paths.add(normalized or str(value))
+                elif param_type == 'file' and not readonly:
+                    # Writable file output: resolve TEMPORARY_OUTPUT to a real
+                    # path now so geoengine run receives an actual filesystem path
+                    # rather than the literal string "TEMPORARY_OUTPUT".
+                    raw = parameters[name]
+                    if hasattr(raw, 'source'):
+                        raw = raw.source()
+                    path_text = str(raw).strip() if raw is not None else ""
+                    if path_text == "TEMPORARY_OUTPUT":
+                        filetypes = [
+                            ft for ft in (inp.get('filetypes') or []) if ft != ".*"
+                        ]
+                        suffix = filetypes[0] if len(filetypes) == 1 else (
+                            os.path.splitext(str(inp.get('default') or ""))[1]
+                        )
+                        tmp_dir = tempfile.mkdtemp()
+                        os.chmod(tmp_dir, 0o777)
+                        path_text = os.path.join(tmp_dir, f"output{suffix}")
+                        feedback.pushInfo(
+                            f"Using temporary output path for input '{name}': {path_text!r}"
+                        )
+                    value = path_text
+                    resolved_writable_file_paths[name] = path_text
                 else:
                     value = parameters[name]
                     if hasattr(value, 'source'):
@@ -756,7 +959,10 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             self.OPEN_OUTPUT_FOLDER_PARAM,
             default=False,
         )
-        requested_output_dirs = self._output_dirs_from_parameters(parameters, context, feedback)
+        requested_output_dirs = self._output_dirs_from_parameters(
+            parameters, context, feedback,
+            resolved_writable_files=resolved_writable_file_paths,
+        )
 
         try:
             result = client.run_tool(

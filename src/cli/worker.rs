@@ -40,6 +40,18 @@ struct WorkerDescription {
     version: Option<String>,
     version_built: Option<String>,
     inputs: Vec<InputDescriptionJson>,
+    /// RFC3339 timestamp of the last `geoengine apply`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    applied_at: Option<String>,
+    /// RFC3339 timestamp of the last `geoengine build`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    built_at: Option<String>,
+    /// First 12 hex chars of the full geoengine.yaml SHA-256 hash
+    #[serde(skip_serializing_if = "Option::is_none")]
+    yaml_hash: Option<String>,
+    /// First 12 hex chars of the command script SHA-256 hash
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script_hash: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,6 +68,8 @@ struct InputDescriptionJson {
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enum_values: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filetypes: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -511,9 +525,11 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
 
     // --- Update state with new hashes after successful build ---
     let prev_state = state::load_state(worker)?;
+    let now = chrono::Utc::now().to_rfc3339();
     let new_state = WorkerState {
         worker_name: worker.to_string(),
-        applied_at: chrono::Utc::now().to_rfc3339(),
+        applied_at: prev_state.as_ref().map(|s| s.applied_at.clone()).unwrap_or_else(|| now.clone()),
+        built_at: Some(now),
         yaml_build_hash,
         yaml_hash: prev_state.as_ref().and_then(|s| s.yaml_hash.clone()),
         dockerfile_hash,
@@ -856,9 +872,11 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No command specified in geoengine.yaml of worker '{}'", worker_name))?
         .script
         .clone());
+    let built_at = prev_state.as_ref().and_then(|s| s.built_at.clone());
     let new_state = WorkerState {
         worker_name: worker_name.clone(),
         applied_at: chrono::Utc::now().to_rfc3339(),
+        built_at,
         yaml_build_hash,
         yaml_hash,
         dockerfile_hash,
@@ -918,6 +936,9 @@ pub async fn delete_worker(name: Option<&str>) -> Result<()> {
     state::delete_state(&worker_name)?;
     yaml_store::delete_saved_config(&worker_name)?;
 
+    // Touch QGIS refresh trigger so the plugin auto-reloads tools after delete
+    touch_qgis_refresh_trigger();
+
     println!(
         "{} Deleted worker '{}'",
         "✓".green().bold(),
@@ -967,7 +988,7 @@ pub async fn run_worker(
     let mut extra_mounts: Vec<(String, String, bool)> = Vec::new();
     let mut writable_file_input_targets: Vec<PathBuf> = Vec::new();
     let mut readonly_input_files: Vec<PathBuf> = Vec::new();
-    let input_definitions: HashMap<String, (String, bool, bool)> = cmd_config
+    let input_definitions: HashMap<String, (String, bool, bool, Option<Vec<String>>)> = cmd_config
         .inputs
         .as_ref()
         .map(|defs| {
@@ -975,7 +996,7 @@ pub async fn run_worker(
                 .map(|d| {
                     (
                         d.name.clone(),
-                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true), d.required.unwrap_or(true)),
+                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true), d.required.unwrap_or(true), d.filetypes.clone()),
                     )
                 })
                 .collect()
@@ -991,7 +1012,7 @@ pub async fn run_worker(
         });
         // Only auto-mount for declared file/folder inputs.
         // Ignore optional fields left blank.
-        let processed_value = if let Some((param_type, readonly, required)) = input_definitions.get(key) {
+        let processed_value = if let Some((param_type, readonly, required, filetypes)) = input_definitions.get(key) {
             match param_type.as_str() {
                 "file" => {
                     // Check if path given is empty, and enforce if it is a required input.
@@ -1031,6 +1052,36 @@ pub async fn run_worker(
                             key,
                             value
                         );
+                    }
+
+                    // Validate file extension against accepted filetypes (early, before mounting).
+                    // Only applies to readonly (input) files — for writable (output) files the
+                    // script decides the format at runtime, so pre-validating the path extension
+                    // is not meaningful and would block extension-free temp paths.
+                    // None or [".*"] means all types are accepted.
+                    if *readonly {
+                        if let Some(accepted) = filetypes {
+                            let accepts_all = accepted.is_empty()
+                                || accepted.iter().any(|ft| ft == ".*");
+                            if !accepts_all {
+                                let ext = path
+                                    .extension()
+                                    .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
+                                    .unwrap_or_default();
+                                let matched = accepted.iter().any(|ft| {
+                                    ft.to_ascii_lowercase() == ext
+                                });
+                                if !matched {
+                                    anyhow::bail!(
+                                        "Input '{}': file '{}' has extension '{}' but only {:?} are accepted",
+                                        key,
+                                        value,
+                                        if ext.is_empty() { "(none)" } else { &ext },
+                                        accepted
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     let filename = path.file_name().ok_or_else(|| {
@@ -1309,11 +1360,18 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
                 default: i.default.clone(),
                 description: i.description.clone(),
                 enum_values: i.enum_values.clone(),
+                filetypes: i.filetypes.clone(),
             }).collect()
         })
         .unwrap_or_default();
 
     let version_built = get_latest_worker_version_clientless(&config.name).await;
+
+    let worker_state = state::load_state(&worker_name).ok().flatten();
+    let applied_at = worker_state.as_ref().map(|s| s.applied_at.clone());
+    let built_at = worker_state.as_ref().and_then(|s| s.built_at.clone());
+    let yaml_hash = worker_state.as_ref().and_then(|s| s.yaml_hash.as_ref().map(|h| short_hash(h)));
+    let script_hash = worker_state.as_ref().and_then(|s| s.command_hash.as_ref().map(|h| short_hash(h)));
 
     let desc = WorkerDescription {
         name: config.name.clone(),
@@ -1321,6 +1379,10 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
         version: Some(config.version.clone()),
         version_built,
         inputs,
+        applied_at,
+        built_at,
+        yaml_hash,
+        script_hash,
     };
 
     if json {

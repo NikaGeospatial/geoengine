@@ -10,16 +10,37 @@ command:
       required: true
       description: Polygon study area layer
       readonly: true
+      filetypes:
+        - .gpkg
+        - .geojson
+        - .json
+        - .shp
+        - .zip
+        - .fgb
     - name: incidents-path
       type: file
       required: true
       description: Incidents layer (point or centroid-coercible geometry)
       readonly: true
+      filetypes:
+        - .gpkg
+        - .geojson
+        - .json
+        - .shp
+        - .zip
+        - .fgb
     - name: facilities-path
       type: file
       required: true
       description: Facilities layer (point or centroid-coercible geometry)
       readonly: true
+      filetypes:
+        - .gpkg
+        - .geojson
+        - .json
+        - .shp
+        - .zip
+        - .fgb
     - name: output-folder
       type: folder
       required: true
@@ -30,6 +51,13 @@ command:
       required: false
       description: Optional polygon layer for neighborhood summaries
       readonly: true
+      filetypes:
+        - .gpkg
+        - .geojson
+        - .json
+        - .shp
+        - .zip
+        - .fgb
     - name: severity-col
       type: string
       required: false
