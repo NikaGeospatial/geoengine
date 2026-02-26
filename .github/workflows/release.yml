@@ -114,33 +114,3 @@ jobs:
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  update-homebrew:
-    name: Update Homebrew Formula
-    needs: release
-    runs-on: ubuntu-latest
-    if: ${{ !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc') }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Calculate SHA256
-        id: sha
-        run: |
-          echo "darwin_x86_64=$(shasum -a 256 artifacts/geoengine-darwin-x86_64/geoengine-darwin-x86_64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-          echo "darwin_aarch64=$(shasum -a 256 artifacts/geoengine-darwin-aarch64/geoengine-darwin-aarch64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-          echo "linux_x86_64=$(shasum -a 256 artifacts/geoengine-linux-x86_64/geoengine-linux-x86_64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-          echo "linux_aarch64=$(shasum -a 256 artifacts/geoengine-linux-aarch64/geoengine-linux-aarch64.tar.gz | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-
-      - name: Print SHA256 values
-        run: |
-          echo "Update install/geoengine.rb with these SHA256 values:"
-          echo "  darwin-x86_64:  ${{ steps.sha.outputs.darwin_x86_64 }}"
-          echo "  darwin-aarch64: ${{ steps.sha.outputs.darwin_aarch64 }}"
-          echo "  linux-x86_64:   ${{ steps.sha.outputs.linux_x86_64 }}"
-          echo "  linux-aarch64:  ${{ steps.sha.outputs.linux_aarch64 }}"
