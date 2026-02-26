@@ -228,7 +228,8 @@ impl DockerClient {
         verbose: bool,
     ) -> Result<()> {
         let mut cmd = std::process::Command::new("docker");
-        cmd.args(["build", "-t", tag, "-f", dockerfile.to_str().unwrap()]);
+        cmd.args(["build", "-t", tag, "-f"]);
+        cmd.arg(dockerfile.as_os_str());
 
         if no_cache {
             cmd.arg("--no-cache");
@@ -238,7 +239,7 @@ impl DockerClient {
             cmd.args(["--build-arg", &format!("{}={}", k, v)]);
         }
 
-        cmd.arg(context.to_str().unwrap());
+        cmd.arg(context.as_os_str());
 
         if verbose {
             cmd.args(["--progress", "plain"]);
@@ -277,7 +278,9 @@ impl DockerClient {
         let status = child.wait().await.context("`docker build` process failed")?;
 
         if !status.success() {
-            if stderr_output.is_empty() {
+            if verbose {
+                anyhow::bail!("Build failed (exit code {:?}).", status.code());
+            } else if stderr_output.is_empty() {
                 anyhow::bail!("Build failed (exit code {:?}). Re-run with --verbose for details.", status.code());
             } else {
                 anyhow::bail!("Build failed:\n{}", stderr_output.trim());

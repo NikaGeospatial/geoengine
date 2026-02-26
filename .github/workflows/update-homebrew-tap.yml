@@ -7,7 +7,7 @@ on:
 jobs:
   bump-homebrew:
     runs-on: ubuntu-latest
-    if: ${{ !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc') }}
+    if: ${{ github.event.release.prerelease == false }}
     steps:
       - name: Get version from tag
         id: version
@@ -52,10 +52,10 @@ jobs:
 
           # Update SHA256 values using line-number anchors to target each platform block correctly.
           # Strategy: replace the sha256 on the line immediately following each platform URL.
-          sed -i "/geoengine-darwin-x86_64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*\"/sha256 \"${DARWIN_X86_64}\"/;}" "$FORMULA"
-          sed -i "/geoengine-darwin-aarch64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*\"/sha256 \"${DARWIN_AARCH64}\"/;}" "$FORMULA"
-          sed -i "/geoengine-linux-x86_64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*\"/sha256 \"${LINUX_X86_64}\"/;}" "$FORMULA"
-          sed -i "/geoengine-linux-aarch64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*\"/sha256 \"${LINUX_AARCH64}\"/;}" "$FORMULA"
+          sed -i "/geoengine-darwin-x86_64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${DARWIN_X86_64}\"/;}" "$FORMULA"
+          sed -i "/geoengine-darwin-aarch64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${DARWIN_AARCH64}\"/;}" "$FORMULA"
+          sed -i "/geoengine-linux-x86_64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${LINUX_X86_64}\"/;}" "$FORMULA"
+          sed -i "/geoengine-linux-aarch64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${LINUX_AARCH64}\"/;}" "$FORMULA"
 
       - name: Commit and push
         run: |
