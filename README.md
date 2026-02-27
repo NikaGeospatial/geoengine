@@ -527,8 +527,7 @@ Copy-Item -Recurse skills\* "$env:USERPROFILE\.claude\skills\"   # Claude Code
 
 > The skills directories must exist before copying. Create them if needed:
 > - **macOS/Linux:** `mkdir -p ~/.claude/skills` or `mkdir -p ~/.codex/skills`
-> - **Windows:** `New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills"`
-
+> - **Windows:** `New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills"` or `New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills"`
 ### Using Skills
 After copying the folder, the skills should be made available to the agent. Allow the agent access to the directory that
 contains your script, then prompt the agent your needs. For example (in `examples/synthetic-hotspot-analysis`):
