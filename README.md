@@ -479,28 +479,13 @@ In order to use AI Agents, refer to the respective sections below.
 
 ### Activating Skills
 
+#### Ensure skills directory existence
+
 > The skills directories must exist before copying. Create them if needed:
 > - **macOS/Linux:** `mkdir -p ~/.claude/skills` or `mkdir -p ~/.codex/skills`
 > - **Windows:** `New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills"` or `New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills"`
 
-**Option A — Clone the full repo and copy the skills folder:**
-
-Replace ".claude" with agent's folder. For example, if you use OpenAI's Codex, replace with ".codex".
-
-_macOS / Linux / WSL2_
-```bash
-git clone https://github.com/NikaGeospatial/geoengine.git
-cp -r geoengine/skills/* ~/.claude/skills/
-```
-
-_Windows (PowerShell)_
-```powershell
-git clone https://github.com/NikaGeospatial/geoengine.git
-Copy-Item -Recurse geoengine\skills\* "$env:USERPROFILE\.claude\skills\"
-```
-
-**Option B — Download only the `skills` folder (sparse checkout, no full clone):**
-
+#### Downloading skills from GitHub
 Replace ".claude" with agent's folder. For example, if you use OpenAI's Codex, replace with ".codex".
 
 _macOS / Linux / WSL2_
@@ -519,6 +504,7 @@ git sparse-checkout set skills
 Copy-Item -Recurse skills\* "$env:USERPROFILE\.claude\skills\"
 ```
 
+#### Removal of geoengine folder
 You can proceed to delete the `geoengine` folder that was generated from this step.
 
 ### Using Skills
