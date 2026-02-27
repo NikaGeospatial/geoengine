@@ -4,6 +4,7 @@ GeoEngine QGIS Plugin - Main plugin class
 """
 
 import os
+import shutil
 
 from qgis.core import QgsApplication
 from qgis.PyQt.QtCore import QFileSystemWatcher
@@ -15,6 +16,7 @@ from .geoengine_provider import (
     GeoEngineCLIClient,
     is_dev_mode_enabled,
     set_dev_mode_enabled,
+    _PLUGIN_TMP_DIR,
 )
 
 # Sentinel file that geoengine apply touches to signal a refresh
@@ -150,6 +152,9 @@ class GeoEnginePlugin:
         # Remove provider
         if self.provider:
             QgsApplication.processingRegistry().removeProvider(self.provider)
+
+        # Clean up plugin-local temp files created during this session.
+        shutil.rmtree(_PLUGIN_TMP_DIR, ignore_errors=True)
 
     def show_status(self):
         """Show GeoEngine CLI status."""

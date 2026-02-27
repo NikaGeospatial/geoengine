@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtGui import QDesktopServices
@@ -37,6 +37,17 @@ from qgis.core import (
     QgsVectorFileWriter,
 )
 
+
+# ---------------------------------------------------------------------------
+# Plugin-local temp directory
+# ---------------------------------------------------------------------------
+# All mkdtemp calls use this as their base directory so that temporary files
+# live inside the plugin folder rather than the OS temp root (e.g. macOS
+# /var/folders/…).  The plugin folder is already bind-mounted into Docker, so
+# any sub-directory is accessible to the container without extra configuration.
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+_PLUGIN_TMP_DIR = os.path.join(_PLUGIN_DIR, "tmp")
+os.makedirs(_PLUGIN_TMP_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # CLI Client
@@ -596,12 +607,20 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
 
     @staticmethod
     def _is_supported_output_file(path: str) -> bool:
-        """Return True for likely GIS layer files and False for common sidecars."""
+        """Return True for likely GIS layer files and False for common sidecars.
+
+        Files with no extension are passed through for a blind probe attempt in
+        _try_load_output_layer — QGIS will try both raster and vector drivers
+        and silently discard it if neither succeeds.
+        """
         lower_name = os.path.basename(path).lower()
         if lower_name.endswith(('.aux.xml', '.ovr', '.prj', '.shx', '.dbf', '.cpg', '.qix', '.sbn', '.sbx')):
             return False
 
         ext = os.path.splitext(lower_name)[1]
+        if not ext:
+            # No extension — let _try_load_output_layer probe it.
+            return True
         supported = {
             '.shp', '.gpkg', '.geojson', '.json', '.kml', '.gml', '.sqlite',
             '.tif', '.tiff', '.vrt', '.img', '.jp2', '.asc'
@@ -660,14 +679,30 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         input_name: str,
         context: QgsProcessingContext,
         feedback: QgsProcessingFeedback,
-    ) -> (str, str):
-        """Export a vector layer to a temporary GeoPackage and return (path, temp_dir)."""
-        temp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-input-")
-        out_path = os.path.join(temp_dir, f"{self._safe_temp_stem(input_name)}.gpkg")
+        suffix: str = ".gpkg",
+    ) -> Tuple[str, str]:
+        """Export a vector layer to a temporary file and return (path, temp_dir).
+
+        suffix controls the output format (default .gpkg).  Pass a different
+        extension (e.g. ".geojson") when the target worker only accepts that type.
+        """
+        temp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-input-", dir=_PLUGIN_TMP_DIR)
+        out_path = os.path.join(temp_dir, f"{self._safe_temp_stem(input_name)}{suffix}")
         feedback.pushInfo(f"Exporting non-file-backed vector input '{input_name}' to temp file...")
 
+        # Map extension → OGR driver name.
+        _VECTOR_DRIVERS = {
+            ".gpkg": "GPKG",
+            ".geojson": "GeoJSON",
+            ".json": "GeoJSON",
+            ".shp": "ESRI Shapefile",
+            ".kml": "KML",
+            ".gml": "GML",
+            ".sqlite": "SQLite",
+        }
+        driver = _VECTOR_DRIVERS.get(suffix.lower(), "GPKG")
         options = QgsVectorFileWriter.SaveVectorOptions()
-        options.driverName = "GPKG"
+        options.driverName = driver
         options.fileEncoding = "UTF-8"
         result = QgsVectorFileWriter.writeAsVectorFormatV3(
                 layer,
@@ -679,7 +714,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
 
         if err_code != QgsVectorFileWriter.NoError:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            raise Exception(f"Failed to export vector input '{input_name}' to temporary GeoPackage")
+            raise Exception(f"Failed to export vector input '{input_name}' to temporary {driver} file")
 
         return out_path, temp_dir
 
@@ -691,7 +726,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         feedback: QgsProcessingFeedback,
     ) -> (str, str):
         """Export a raster layer to a temporary GeoTIFF and return (path, temp_dir)."""
-        temp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-input-")
+        temp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-input-", dir=_PLUGIN_TMP_DIR)
         out_path = os.path.join(temp_dir, f"{self._safe_temp_stem(input_name)}.tif")
         feedback.pushInfo(f"Exporting non-file-backed raster input '{input_name}' to temp file...")
 
@@ -729,15 +764,20 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         input_name: str,
         context: QgsProcessingContext,
         feedback: QgsProcessingFeedback,
+        vector_suffix: str = ".gpkg",
     ) -> Optional[Dict[str, str]]:
-        """Export a non-file-backed layer to a temp file and return metadata."""
+        """Export a non-file-backed layer to a temp file and return metadata.
+
+        vector_suffix: desired output extension for vector layers (e.g. ".geojson").
+        Raster layers are always exported as GeoTIFF.
+        """
         try:
             layer_type = layer.type()
         except Exception:
             layer_type = None
 
         if layer_type == QgsMapLayerType.VectorLayer:
-            out_path, temp_dir = self._export_vector_layer_to_temp(layer, input_name, context, feedback)
+            out_path, temp_dir = self._export_vector_layer_to_temp(layer, input_name, context, feedback, suffix=vector_suffix)
             return {"path": out_path, "temp_dir": temp_dir}
         if layer_type == QgsMapLayerType.RasterLayer:
             out_path, temp_dir = self._export_raster_layer_to_temp(layer, input_name, context, feedback)
@@ -750,8 +790,24 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         parameters: Dict,
         context: QgsProcessingContext,
         feedback: QgsProcessingFeedback,
+        filetypes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Resolve a read-only file input from a map-layer parameter to a local path."""
+        """Resolve a read-only file input from a map-layer parameter to a local path.
+
+        filetypes: extensions accepted by the worker (e.g. [".geojson"]).  Used to
+        pick the right export format when the source layer is not already in an
+        accepted format (e.g. a no-extension QGIS scratch layer).
+        """
+        # Determine the preferred vector export suffix from the worker's accepted
+        # filetypes.  Use the first declared type that maps to an OGR-writable
+        # vector format; fall back to .gpkg if none match.
+        _VECTOR_EXTS = {".gpkg", ".geojson", ".json", ".shp", ".kml", ".gml", ".sqlite"}
+        accepted = [str(ft).lower() for ft in (filetypes or []) if ft != ".*"]
+        preferred_vector_suffix = next(
+            (ft for ft in accepted if ft.lower() in _VECTOR_EXTS),
+            ".gpkg",
+        )
+
         layer = self.parameterAsLayer(parameters, name, context)
         if layer is not None:
             source = None
@@ -771,9 +827,17 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 normalized = None
             else:
                 normalized = self._normalize_local_file_path(source_text)
+            # Only use the file path directly when it already has an extension that
+            # the worker accepts (or when no filetypes restriction is declared).
+            # A no-extension path (QGIS scratch layer) must be exported so the CLI
+            # receives a properly named file in the expected format.
             if normalized:
-                return {"path": normalized, "temp_dir": None, "exported_temp": False}
-            exported = self._export_layer_to_temp_if_needed(layer, name, context, feedback)
+                ext = os.path.splitext(normalized)[1].lower()
+                if ext and (not accepted or ext in accepted):
+                    return {"path": normalized, "temp_dir": None, "exported_temp": False}
+            exported = self._export_layer_to_temp_if_needed(
+                layer, name, context, feedback, vector_suffix=preferred_vector_suffix
+            )
             if exported:
                 return {"path": exported["path"], "temp_dir": exported["temp_dir"], "exported_temp": True}
             return {"path": str(source) if source else None, "temp_dir": None, "exported_temp": False}
@@ -873,7 +937,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                     # mkstemp pitfall where a pre-created file blocks geospatial
                     # writers (GDAL, fiona, terra, etc.) that refuse to overwrite
                     # or misinterpret an already-existing empty file.
-                    tmp_dir = tempfile.mkdtemp()
+                    tmp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-output-", dir=_PLUGIN_TMP_DIR)
                     os.chmod(tmp_dir, 0o700)  # owner-only; Docker mounts inherit host UID
                     path_text = os.path.join(tmp_dir, f"output{suffix}")
                 # Use the parent directory for writable file targets.
@@ -917,7 +981,8 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 param_type = inp.get('param_type', 'string')
                 readonly = inp.get('readonly', True)
                 if param_type == 'file' and readonly:
-                    resolved = self._resolve_readonly_file_input(name, parameters, context, feedback)
+                    inp_filetypes = [ft for ft in (inp.get('filetypes') or []) if ft != ".*"]
+                    resolved = self._resolve_readonly_file_input(name, parameters, context, feedback, filetypes=inp_filetypes)
                     value = resolved.get("path")
                     if resolved.get("temp_dir"):
                         temp_export_dirs.append(str(resolved["temp_dir"]))
@@ -939,13 +1004,31 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                         suffix = filetypes[0] if len(filetypes) == 1 else (
                             os.path.splitext(str(inp.get('default') or ""))[1]
                         )
-                        tmp_dir = tempfile.mkdtemp()
-                        os.chmod(tmp_dir, 0o777)
+                        tmp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-output-", dir=_PLUGIN_TMP_DIR)
+                        os.chmod(tmp_dir, 0o700)
                         path_text = os.path.join(tmp_dir, f"output{suffix}")
                         feedback.pushInfo(
                             f"Using temporary output path for input '{name}': {path_text!r}"
                         )
                     value = path_text
+                    resolved_writable_file_paths[name] = path_text
+                elif param_type == 'folder' and not readonly:
+                    # Writable folder output: resolve TEMPORARY_OUTPUT to a real
+                    # directory so geoengine run receives an actual filesystem path.
+                    raw = parameters[name]
+                    if hasattr(raw, 'source'):
+                        raw = raw.source()
+                    path_text = str(raw).strip() if raw is not None else ""
+                    if path_text == "TEMPORARY_OUTPUT":
+                        tmp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-output-", dir=_PLUGIN_TMP_DIR)
+                        os.chmod(tmp_dir, 0o700)
+                        path_text = tmp_dir
+                        feedback.pushInfo(
+                            f"Using temporary output folder for input '{name}': {path_text!r}"
+                        )
+                    value = path_text
+                    # Also record the resolved folder path so _output_dirs_from_parameters
+                    # uses the real directory instead of re-reading "TEMPORARY_OUTPUT".
                     resolved_writable_file_paths[name] = path_text
                 else:
                     value = parameters[name]
