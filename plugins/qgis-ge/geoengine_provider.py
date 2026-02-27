@@ -403,9 +403,13 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         """
         try:
             from datetime import datetime, timezone
+            # Strip fractional seconds, then remove any trailing timezone offset
+            # (Z, +HH:MM, or -HH:MM) so strptime receives a bare local-time string.
             ts = iso_ts.split('.')[0].rstrip('Z')
-            if '+' in ts:
-                ts = ts.split('+')[0]
+            for sep in ('+', '-'):
+                if sep in ts[10:]:  # skip date separators before position 10
+                    ts = ts[:ts.index(sep, 10)]
+                    break
             dt_utc = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
             delta = max(0, int((now - dt_utc).total_seconds()))
@@ -870,7 +874,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                     # writers (GDAL, fiona, terra, etc.) that refuse to overwrite
                     # or misinterpret an already-existing empty file.
                     tmp_dir = tempfile.mkdtemp()
-                    os.chmod(tmp_dir, 0o777)
+                    os.chmod(tmp_dir, 0o700)  # owner-only; Docker mounts inherit host UID
                     path_text = os.path.join(tmp_dir, f"output{suffix}")
                 # Use the parent directory for writable file targets.
                 if path_text.startswith("file://"):

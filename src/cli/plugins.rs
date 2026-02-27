@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+
+use crate::config::state;
 
 /// Install the GeoEngine plugin into ArcGIS Pro's toolbox directory.
 pub async fn register_arcgis(custom_path: Option<PathBuf>) -> Result<()> {
@@ -94,11 +95,6 @@ pub enum PluginPatchResult {
     Failed(anyhow::Error),
 }
 
-fn sha256_str(s: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(s.as_bytes());
-    format!("{:x}", h.finalize())
-}
 
 /// Check the installed QGIS plugin against the canonical embedded files and reinstall
 /// if any file is missing or has a different hash. If QGIS is not installed on this
@@ -127,7 +123,7 @@ pub async fn patch_qgis() -> Result<PluginPatchResult> {
     let needs_update = canonical.iter().any(|(filename, expected)| {
         let path = geoengine_dir.join(filename);
         match std::fs::read_to_string(&path) {
-            Ok(content) => sha256_str(&content) != sha256_str(expected),
+            Ok(content) => state::sha256_string(&content) != state::sha256_string(expected),
             Err(_) => true, // missing counts as stale
         }
     });
@@ -176,7 +172,7 @@ pub async fn patch_arcgis() -> Result<PluginPatchResult> {
     let needs_update = canonical.iter().any(|(filename, expected)| {
         let path = toolbox_dir.join(filename);
         match std::fs::read_to_string(&path) {
-            Ok(content) => sha256_str(&content) != sha256_str(expected),
+            Ok(content) => state::sha256_string(&content) != state::sha256_string(expected),
             Err(_) => true,
         }
     });

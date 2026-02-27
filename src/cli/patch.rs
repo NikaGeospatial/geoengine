@@ -49,10 +49,7 @@ pub async fn patch_all() -> Result<()> {
             issues.push(msg);
             // Cannot continue without settings — report and exit
             print_summary(workers_checked, dockerfiles_updated, 0, &issues);
-            if !issues.is_empty() {
-                std::process::exit(1);
-            }
-            return Ok(());
+            std::process::exit(1);
         }
     };
 

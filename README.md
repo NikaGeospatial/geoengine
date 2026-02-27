@@ -468,7 +468,7 @@ CUDA is not available on macOS. PyTorch will automatically use the MPS (Metal) b
 | `geoengine delete [--name <worker>]`                           | Delete a worker, clean up state and saved configuration                                     |
 | `geoengine workers [--json] [--gis arcgis\|qgis]`              | List registered workers                                                                     |
 | `geoengine describe [<worker>] [--json]`                       | Displays information from saved configuration file of specified worker                      |
-| `geoengine patch`                                              | Validate all artifacts and reinstall stale Dockerfiles and GIS plugins                      |
+| `geoengine patch`                                              | Validate all artifacts, regenerate (rewrite) stale Dockerfiles, and reinstall stale GIS plugin images |
 | `geoengine image list\|import\|remove`                         | Manage Docker images                                                                        |
 | `geoengine deploy auth\|push\|pull\|list`                      | GCP Artifact Registry operations                                                            |
 
