@@ -680,7 +680,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         context: QgsProcessingContext,
         feedback: QgsProcessingFeedback,
         suffix: str = ".gpkg",
-    ) -> (str, str):
+    ) -> Tuple[str, str]:
         """Export a vector layer to a temporary file and return (path, temp_dir).
 
         suffix controls the output format (default .gpkg).  Pass a different
