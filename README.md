@@ -532,7 +532,7 @@ Copy-Item -Recurse skills\* "$env:USERPROFILE\.claude\skills\"   # Claude Code
 ### Using Skills
 After copying the folder, the skills should be made available to the agent. Allow the agent access to the directory that
 contains your script, then prompt the agent your needs. For example (in `examples/synthetic-hotspot-analysis`):
-```
+```text
 Make the function `run_hotspot_analysis_from_files()` from `hotspot_analysis.py` a GeoEngine worker.
 ```
 The agent will then run the whole process stipulated above automatically, even creating an argument parser if not already available
