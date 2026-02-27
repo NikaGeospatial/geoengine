@@ -26,27 +26,31 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
-            echo "ERROR: Could not extract valid version from tag: $GITHUB_REF_NAME" >&2
+          # Strict semver: MAJOR.MINOR.PATCH with optional pre-release (-alpha.1, -rc.2, etc.) and build metadata (+build.1)
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?(\+[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)*)?$ ]]; then
+            echo "ERROR: Could not extract valid semver from tag: $GITHUB_REF_NAME" >&2
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked
+
       - name: Update version in Cargo.toml
+        run: cargo set-version ${{ steps.version.outputs.version }}
+
+      - name: Commit and push to main, move tag
         run: |
           set -euo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
-          sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
-          grep -q "^version = \"$VERSION\"" Cargo.toml || { echo "ERROR: version replacement failed in Cargo.toml" >&2; exit 1; }
-
-      - name: Commit and push to main
-        run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml
+          git add Cargo.toml Cargo.lock
           git diff --cached --quiet && echo "Cargo.toml already up to date" && exit 0
           git commit -m "chore: bump Cargo.toml version to ${{ steps.version.outputs.version }}"
           git push origin main
+          # Move the tag to the new commit so builds use the bumped Cargo.toml
+          git tag -f "$GITHUB_REF_NAME"
+          git push origin -f "refs/tags/$GITHUB_REF_NAME"
 
   build:
     name: Build ${{ matrix.target }}
@@ -134,8 +138,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
