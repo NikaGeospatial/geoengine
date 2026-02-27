@@ -479,45 +479,48 @@ In order to use AI Agents, refer to the respective sections below.
 
 ### Activating Skills
 
+> The skills directories must exist before copying. Create them if needed:
+> - **macOS/Linux:** `mkdir -p ~/.claude/skills` or `mkdir -p ~/.codex/skills`
+> - **Windows:** `New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills"` or `New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills"`
+
 **Option A — Clone the full repo and copy the skills folder:**
 
+Replace ".claude" with agent's folder. For example, if you use OpenAI's Codex, replace with ".codex".
+
+_macOS / Linux / WSL2_
 ```bash
-# macOS / Linux / WSL2
 git clone https://github.com/NikaGeospatial/geoengine.git
-cp -r geoengine/skills/* ~/.claude/skills/   # Claude Code
-# cp -r geoengine/skills/* ~/.codex/skills/  # OpenAI Codex
+cp -r geoengine/skills/* ~/.claude/skills/
 ```
 
+_Windows (PowerShell)_
 ```powershell
-# Windows (PowerShell)
 git clone https://github.com/NikaGeospatial/geoengine.git
-Copy-Item -Recurse geoengine\skills\* "$env:USERPROFILE\.claude\skills\"   # Claude Code
-# Copy-Item -Recurse geoengine\skills\* "$env:USERPROFILE\.codex\skills\"  # OpenAI Codex
+Copy-Item -Recurse geoengine\skills\* "$env:USERPROFILE\.claude\skills\"
 ```
 
 **Option B — Download only the `skills` folder (sparse checkout, no full clone):**
 
+Replace ".claude" with agent's folder. For example, if you use OpenAI's Codex, replace with ".codex".
+
+_macOS / Linux / WSL2_
 ```bash
-# macOS / Linux / WSL2
 git clone --filter=blob:none --sparse https://github.com/NikaGeospatial/geoengine.git
 cd geoengine
 git sparse-checkout set skills
-cp -r skills/* ~/.claude/skills/   # Claude Code
-# cp -r skills/* ~/.codex/skills/  # OpenAI Codex
+cp -r skills/* ~/.claude/skills/
 ```
 
+_Windows (PowerShell)_
 ```powershell
-# Windows (PowerShell)
 git clone --filter=blob:none --sparse https://github.com/NikaGeospatial/geoengine.git
 cd geoengine
 git sparse-checkout set skills
-Copy-Item -Recurse skills\* "$env:USERPROFILE\.claude\skills\"   # Claude Code
-# Copy-Item -Recurse skills\* "$env:USERPROFILE\.codex\skills\"  # OpenAI Codex
+Copy-Item -Recurse skills\* "$env:USERPROFILE\.claude\skills\"
 ```
 
-> The skills directories must exist before copying. Create them if needed:
-> - **macOS/Linux:** `mkdir -p ~/.claude/skills` or `mkdir -p ~/.codex/skills`
-> - **Windows:** `New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\skills"` or `New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills"`
+You can proceed to delete the `geoengine` folder that was generated from this step.
+
 ### Using Skills
 After copying the folder, the skills should be made available to the agent. Allow the agent access to the directory that
 contains your script, then prompt the agent your needs. For example (in `examples/synthetic-hotspot-analysis`):
