@@ -193,23 +193,13 @@ geoengine patch
 ```
 
 It checks and repairs the following:
-
-**Global artifacts (`~/.geoengine/`)**
-- `settings.yaml` — validates that it parses correctly
-- `state/*.yaml` — validates each state file and warns about orphaned entries (no matching registered worker)
-- `configs/*.json` — validates each saved config and warns about orphaned entries
-
-**Per registered worker**
-- Worker path — warns if the registered path no longer exists on disk
-- `geoengine.yaml` — validates schema (read-only, never modified)
-- `pixi.toml` — warns if missing (read-only, never modified)
-- `Dockerfile` and `.dockerignore` — compares content against the current canonical template; silently regenerates if stale or missing
-
-**GIS plugins**
-- Hashes each installed plugin file against the canonical version embedded in the GeoEngine binary
-- If all files match: reports up-to-date
-- If any file is stale or missing: reinstalls the plugin automatically
-- If the GIS application is not installed on the machine: skips that plugin check entirely
+- Global artifacts
+- Worker artifacts
+  - Worker path — warns if the registered path no longer exists on disk
+  - `geoengine.yaml` — validates schema (read-only, never modified)
+  - `pixi.toml` — warns if missing (read-only, never modified)
+  - `Dockerfile` and `.dockerignore` — compares content against the current canonical template; silently regenerates if stale or missing
+- GIS plugins
 
 The command exits with a non-zero status if any validation issue is found (parse errors, missing paths, reinstall failures), making it safe to use in scripts.
 
