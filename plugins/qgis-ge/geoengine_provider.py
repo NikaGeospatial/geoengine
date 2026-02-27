@@ -881,7 +881,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                     # mkstemp pitfall where a pre-created file blocks geospatial
                     # writers (GDAL, fiona, terra, etc.) that refuse to overwrite
                     # or misinterpret an already-existing empty file.
-                    tmp_dir = tempfile.mkdtemp()
+                    tmp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-output-")
                     os.chmod(tmp_dir, 0o700)  # owner-only; Docker mounts inherit host UID
                     path_text = os.path.join(tmp_dir, f"output{suffix}")
                 # Use the parent directory for writable file targets.
@@ -947,8 +947,8 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                         suffix = filetypes[0] if len(filetypes) == 1 else (
                             os.path.splitext(str(inp.get('default') or ""))[1]
                         )
-                        tmp_dir = tempfile.mkdtemp()
-                        os.chmod(tmp_dir, 0o777)
+                        tmp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-output-")
+                        os.chmod(tmp_dir, 0o700)
                         path_text = os.path.join(tmp_dir, f"output{suffix}")
                         feedback.pushInfo(
                             f"Using temporary output path for input '{name}': {path_text!r}"
@@ -963,13 +963,8 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                         raw = raw.source()
                     path_text = str(raw).strip() if raw is not None else ""
                     if path_text == "TEMPORARY_OUTPUT":
-                        # Use /tmp explicitly so the path stays within Docker
-                        # Desktop's default shared directories on macOS.
-                        # tempfile.mkdtemp() without a dir returns /var/folders/...
-                        # which canonicalises to /private/var/folders/... and may
-                        # not be bind-mountable.
-                        tmp_dir = tempfile.mkdtemp()
-                        os.chmod(tmp_dir, 0o777)
+                        tmp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-output-")
+                        os.chmod(tmp_dir, 0o700)
                         path_text = tmp_dir
                         feedback.pushInfo(
                             f"Using temporary output folder for input '{name}': {path_text!r}"
