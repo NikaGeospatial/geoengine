@@ -596,12 +596,20 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
 
     @staticmethod
     def _is_supported_output_file(path: str) -> bool:
-        """Return True for likely GIS layer files and False for common sidecars."""
+        """Return True for likely GIS layer files and False for common sidecars.
+
+        Files with no extension are passed through for a blind probe attempt in
+        _try_load_output_layer — QGIS will try both raster and vector drivers
+        and silently discard it if neither succeeds.
+        """
         lower_name = os.path.basename(path).lower()
         if lower_name.endswith(('.aux.xml', '.ovr', '.prj', '.shx', '.dbf', '.cpg', '.qix', '.sbn', '.sbx')):
             return False
 
         ext = os.path.splitext(lower_name)[1]
+        if not ext:
+            # No extension — let _try_load_output_layer probe it.
+            return True
         supported = {
             '.shp', '.gpkg', '.geojson', '.json', '.kml', '.gml', '.sqlite',
             '.tif', '.tiff', '.vrt', '.img', '.jp2', '.asc'
@@ -946,6 +954,29 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                             f"Using temporary output path for input '{name}': {path_text!r}"
                         )
                     value = path_text
+                    resolved_writable_file_paths[name] = path_text
+                elif param_type == 'folder' and not readonly:
+                    # Writable folder output: resolve TEMPORARY_OUTPUT to a real
+                    # directory so geoengine run receives an actual filesystem path.
+                    raw = parameters[name]
+                    if hasattr(raw, 'source'):
+                        raw = raw.source()
+                    path_text = str(raw).strip() if raw is not None else ""
+                    if path_text == "TEMPORARY_OUTPUT":
+                        # Use /tmp explicitly so the path stays within Docker
+                        # Desktop's default shared directories on macOS.
+                        # tempfile.mkdtemp() without a dir returns /var/folders/...
+                        # which canonicalises to /private/var/folders/... and may
+                        # not be bind-mountable.
+                        tmp_dir = tempfile.mkdtemp()
+                        os.chmod(tmp_dir, 0o777)
+                        path_text = tmp_dir
+                        feedback.pushInfo(
+                            f"Using temporary output folder for input '{name}': {path_text!r}"
+                        )
+                    value = path_text
+                    # Also record the resolved folder path so _output_dirs_from_parameters
+                    # uses the real directory instead of re-reading "TEMPORARY_OUTPUT".
                     resolved_writable_file_paths[name] = path_text
                 else:
                     value = parameters[name]
