@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtGui import QDesktopServices
@@ -802,7 +802,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         # filetypes.  Use the first declared type that maps to an OGR-writable
         # vector format; fall back to .gpkg if none match.
         _VECTOR_EXTS = {".gpkg", ".geojson", ".json", ".shp", ".kml", ".gml", ".sqlite"}
-        accepted = [ft for ft in (filetypes or []) if ft != ".*"]
+        accepted = [str(ft).lower() for ft in (filetypes or []) if ft != ".*"]
         preferred_vector_suffix = next(
             (ft for ft in accepted if ft.lower() in _VECTOR_EXTS),
             ".gpkg",
