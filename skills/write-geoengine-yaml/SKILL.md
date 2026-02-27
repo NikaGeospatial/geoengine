@@ -46,6 +46,8 @@ command:
       description: "<text>"      # Optional help text
       enum_values: [...]         # Required ONLY when type is "enum"
       readonly: <bool>           # Only for file/folder. Default: true
+      filetypes: [...]           # Only for file. Accepted extensions e.g. [".tif", ".geotiff"].
+                                 # Omit or use [".*"] to accept all file types.
 
 # ── MOUNTS ────────────────────────────────────────────────────────────
 local_dir_mounts:                # Optional. Extra host-to-container volumes.
@@ -67,15 +69,15 @@ deploy:
 
 ## 3. Input Types -- Detailed Reference
 
-| Type       | What it represents          | Passed to script as               | `readonly` applies? |
-|------------|-----------------------------|-----------------------------------|---------------------|
-| `file`     | Single file path            | `--name /inputs/name/filename`    | Yes                 |
-| `folder`   | Directory path              | `--name /mnt/input_name`          | Yes                 |
-| `string`   | Free-form text              | `--name value`                    | No                  |
-| `number`   | Integer or float            | `--name 42` or `--name 3.14`     | No                  |
-| `boolean`  | True/false                  | `--name true` or `--name false`  | No                  |
-| `enum`     | Constrained choice          | `--name choice`                   | No                  |
-| `datetime` | Date/time string            | `--name 2024-01-15T10:30:00`     | No                  |
+| Type       | What it represents          | Passed to script as               | `readonly` applies? | `filetypes` applies? |
+|------------|-----------------------------|-----------------------------------|---------------------|----------------------|
+| `file`     | Single file path            | `--name /inputs/name/filename`    | Yes                 | Yes                  |
+| `folder`   | Directory path              | `--name /mnt/input_name`          | Yes                 | No                   |
+| `string`   | Free-form text              | `--name value`                    | No                  | No                   |
+| `number`   | Integer or float            | `--name 42` or `--name 3.14`     | No                  | No                   |
+| `boolean`  | True/false                  | `--name true` or `--name false`  | No                  | No                   |
+| `enum`     | Constrained choice          | `--name choice`                   | No                  | No                   |
+| `datetime` | Date/time string            | `--name 2024-01-15T10:30:00`     | No                  | No                   |
 
 ### The `readonly` field
 
@@ -110,6 +112,66 @@ Required **only** when `type: enum`. Lists the allowed string values:
     - png
     - jpeg
     - bmp
+```
+
+### The `filetypes` field
+
+Optional, applies **only** to `type: file`. Lists file extensions. Each entry must start with `.` (e.g., `.tif`). `geoengine run` validates the extension early, before the file is mounted, and bails with a clear error if it does not match.
+Writing this field should require reading the documentation (if available) or the actual script.
+
+- Omit the field (or set it to `[".*"]`) to accept/produce **any** file type.
+- Specify one or more extensions to declare what file types are valid for this parameter.
+
+The meaning of `filetypes` depends on whether the file is an **input** or an **output** (i.e., `readonly`):
+
+| `readonly` | Role | What `filetypes` means |
+|---|---|---|
+| `true` (default) | Input file the script reads | The extensions the script **accepts** as input |
+| `false` | Output file the script writes | The extensions the script **produces** as output |
+
+`geoengine run` validates the extension in both cases — it checks that the provided path matches the declared extensions before mounting. This ensures that callers pass the right input format, and that output paths are pre-declared with the correct extension.
+
+```text
+ Decision tree for filetypes:
+
+   Is this a file input (readonly: true)?
+     |
+     +-- YES --> Are there specific formats the script accepts?
+     |             +-- YES --> List accepted extensions: filetypes: [".tif", ".tiff"]
+     |             +-- NO  --> Omit filetypes (accepts everything)
+     |
+     +-- NO (output file, readonly: false)
+               --> Are there specific formats the script produces?
+                     +-- YES --> List output extensions: filetypes: [".geojson"]
+                     +-- NO  --> Omit filetypes (any extension is valid)
+```
+
+```yaml
+# Input file: only accepts GeoTIFF
+- name: input-file
+  type: file
+  required: true
+  readonly: true         # (default) script reads this file
+  description: Input GeoTIFF raster
+  filetypes:
+    - .tif
+    - .tiff
+
+# Output file: script always writes a GeoJSON
+- name: output-file
+  type: file
+  required: true
+  readonly: false        # script writes this file
+  description: Output feature file
+  filetypes:
+    - .geojson
+
+# Input file: any format accepted (no restriction)
+- name: any-file
+  type: file
+  required: false
+  description: Any supported file
+  # filetypes omitted → accepts/produces all
 ```
 
 ---
@@ -350,6 +412,9 @@ command:
       required: true
       description: Multispectral satellite GeoTIFF (e.g., Landsat 8/9, Sentinel-2)
       readonly: true
+      filetypes:
+        - .tif
+        - .tiff
     - name: output-dir
       type: folder
       required: true
@@ -438,6 +503,8 @@ After writing the YAML, verify every item:
 - [ ] `enum_values` lists match `choices` (Python) or manual validation (R)
 - [ ] `readonly: false` is set for every output directory/file
 - [ ] `readonly: true` (or omitted) for every input-only directory/file
+- [ ] `filetypes` is set for `file` inputs that should only accept specific extensions
+- [ ] `filetypes` entries each start with `.` (e.g., `.tif`, not `tif`)
 - [ ] `local_dir_mounts` does NOT duplicate auto-mounted input parameters
 - [ ] `plugins` section is present (both default to false)
 - [ ] `deploy.tenant_id` is set to null unless a tenant ID is known
@@ -454,3 +521,5 @@ After writing the YAML, verify every item:
 | Forgetting `enum_values` for enum types    | YAML is invalid without it                        |
 | Boolean default as `false` (no quotes)     | Use the bare word `false`, YAML parses it as bool |
 | Mismatched names between YAML and parser   | Runtime will fail; names must match exactly        |
+| Using `filetypes` on non-file inputs       | `filetypes` is only meaningful for `type: file`  |
+| Writing extensions without leading `.`     | Use `.tif` not `tif`; `geoengine run` requires the dot |

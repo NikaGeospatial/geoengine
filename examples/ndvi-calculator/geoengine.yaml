@@ -1,5 +1,5 @@
 name: ndvi-calculator
-version: 1.0.0
+version: "1.0.0"
 description: Computes NDVI from multispectral satellite imagery using R
 command:
   program: Rscript
@@ -10,6 +10,9 @@ command:
     required: true
     description: Path to a multispectral GeoTIFF
     readonly: true
+    filetypes:
+    - .tif
+    - .tiff
   - name: output-dir
     type: folder
     required: true

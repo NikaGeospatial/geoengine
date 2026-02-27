@@ -260,14 +260,33 @@ impl DockerClient {
 
         // Capture stderr when not verbose so we can surface it on failure.
         // Reading stderr to completion before wait() drains the pipe and prevents
-        // the child from blocking on a full buffer.
+        // the child from blocking on a full buffer. Capped at 64 KiB to avoid
+        // unbounded memory growth from pathological docker build output.
+        const MAX_STDERR_BYTES: usize = 64 * 1024;
         let stderr_output = if !verbose {
             let stderr = child.stderr.take();
             if let Some(stderr) = stderr {
                 use tokio::io::AsyncReadExt;
-                let mut buf = String::new();
-                tokio::io::BufReader::new(stderr).read_to_string(&mut buf).await.ok();
-                buf
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let mut raw = vec![0u8; MAX_STDERR_BYTES + 1];
+                let mut total = 0usize;
+                loop {
+                    match reader.read(&mut raw[total..]).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            total += n;
+                            if total >= MAX_STDERR_BYTES {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let truncated = total > MAX_STDERR_BYTES;
+                let mut s = String::from_utf8_lossy(&raw[..total.min(MAX_STDERR_BYTES)]).into_owned();
+                if truncated {
+                    s.push_str("\n...(truncated)");
+                }
+                s
             } else {
                 String::new()
             }

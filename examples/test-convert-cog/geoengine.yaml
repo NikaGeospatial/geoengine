@@ -11,11 +11,17 @@ command:
       required: true
       description: Path to the input GeoTIFF file
       readonly: true
+      filetypes:
+        - .tif
+        - .tiff
     - name: output-path
       type: file
       required: true
       description: Path for the output COG file
       readonly: false
+      filetypes:
+        - .tif
+        - .tiff
 
 plugins:
   arcgis: false

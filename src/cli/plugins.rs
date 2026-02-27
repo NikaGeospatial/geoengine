@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use std::path::PathBuf;
 
+use crate::config::state;
+
 /// Install the GeoEngine plugin into ArcGIS Pro's toolbox directory.
 pub async fn register_arcgis(custom_path: Option<PathBuf>) -> Result<()> {
     println!(
@@ -54,18 +56,6 @@ pub async fn register_qgis(custom_path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Debug helper that installs the QGIS plugin only when missing.
-pub async fn debug_qgis() -> Result<()> {
-    if verify_qgis_plugin_installed()? {
-        println!(
-            "{} QGIS plugin is already installed. No action taken.",
-            "=>".yellow().bold()
-        );
-        return Ok(());
-    }
-
-    register_qgis(None).await
-}
 
 fn missing_files(base: &PathBuf, required: &[&str]) -> Vec<String> {
     required
@@ -91,6 +81,112 @@ pub fn verify_qgis_plugin_installed() -> Result<bool> {
     let qgis_required = ["__init__.py", "geoengine_plugin.py", "geoengine_provider.py", "metadata.txt"];
     let qgis_missing = missing_files(&qgis_dir, &qgis_required);
     Ok(qgis_missing.is_empty())
+}
+
+/// Patch outcome returned to callers (used by `geoengine patch`).
+pub enum PluginPatchResult {
+    /// The plugin directory parent does not exist — GIS not installed on this machine.
+    NotInstalled,
+    /// All installed files already match the canonical embedded content.
+    UpToDate,
+    /// At least one file was stale; the plugin was reinstalled successfully.
+    Updated,
+    /// Reinstall was attempted but failed.
+    Failed(anyhow::Error),
+}
+
+
+/// Check the installed QGIS plugin against the canonical embedded files and reinstall
+/// if any file is missing or has a different hash. If QGIS is not installed on this
+/// machine (parent directory absent), returns `PluginPatchResult::NotInstalled`.
+pub async fn patch_qgis() -> Result<PluginPatchResult> {
+    let plugin_dir = match find_qgis_plugin_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(PluginPatchResult::NotInstalled),
+    };
+
+    // QGIS is considered present when the *parent* of the plugins dir exists.
+    if !plugin_dir.parent().map_or(false, |p| p.exists()) {
+        return Ok(PluginPatchResult::NotInstalled);
+    }
+
+    let geoengine_dir = plugin_dir.join("geoengine");
+
+    // Canonical content (embedded at compile time)
+    let canonical: &[(&str, &str)] = &[
+        ("__init__.py",          include_str!("../../plugins/qgis-ge/__init__.py")),
+        ("geoengine_plugin.py",  include_str!("../../plugins/qgis-ge/geoengine_plugin.py")),
+        ("geoengine_provider.py",include_str!("../../plugins/qgis-ge/geoengine_provider.py")),
+        ("metadata.txt",         include_str!("../../plugins/qgis-ge/metadata.txt")),
+    ];
+
+    let needs_update = canonical.iter().any(|(filename, expected)| {
+        let path = geoengine_dir.join(filename);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => state::sha256_string(&content) != state::sha256_string(expected),
+            Err(_) => true, // missing counts as stale
+        }
+    });
+
+    if !needs_update {
+        return Ok(PluginPatchResult::UpToDate);
+    }
+
+    // Reinstall: wipe existing dir first (same as debug-qgis)
+    if geoengine_dir.exists() {
+        std::fs::remove_dir_all(&geoengine_dir).with_context(|| {
+            format!(
+                "Failed to remove existing QGIS plugin directory: {}",
+                geoengine_dir.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(&geoengine_dir)?;
+
+    match write_qgis_plugin(&geoengine_dir) {
+        Ok(_) => Ok(PluginPatchResult::Updated),
+        Err(e) => Ok(PluginPatchResult::Failed(e)),
+    }
+}
+
+/// Check the installed ArcGIS plugin against the canonical embedded files and reinstall
+/// if any file is missing or has a different hash. If ArcGIS is not installed on this
+/// machine (toolbox parent directory absent), returns `PluginPatchResult::NotInstalled`.
+pub async fn patch_arcgis() -> Result<PluginPatchResult> {
+    let toolbox_dir = match find_arcgis_toolbox_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(PluginPatchResult::NotInstalled),
+    };
+
+    // ArcGIS is considered present when the parent of the Toolboxes dir exists.
+    if !toolbox_dir.parent().map_or(false, |p| p.exists()) {
+        return Ok(PluginPatchResult::NotInstalled);
+    }
+
+    // Canonical content (embedded at compile time)
+    let canonical: &[(&str, &str)] = &[
+        ("GeoEngineTools.pyt",  include_str!("../../plugins/arcgis-ge/GeoEngineTools.pyt")),
+        ("geoengine_client.py", include_str!("../../plugins/arcgis-ge/geoengine_client.py")),
+    ];
+
+    let needs_update = canonical.iter().any(|(filename, expected)| {
+        let path = toolbox_dir.join(filename);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => state::sha256_string(&content) != state::sha256_string(expected),
+            Err(_) => true,
+        }
+    });
+
+    if !needs_update {
+        return Ok(PluginPatchResult::UpToDate);
+    }
+
+    std::fs::create_dir_all(&toolbox_dir)?;
+
+    match write_arcgis_plugin(&toolbox_dir) {
+        Ok(_) => Ok(PluginPatchResult::Updated),
+        Err(e) => Ok(PluginPatchResult::Failed(e)),
+    }
 }
 
 fn find_arcgis_toolbox_dir() -> Result<PathBuf> {

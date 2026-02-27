@@ -114,3 +114,87 @@ jobs:
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc') }}
+    steps:
+      - name: Get version from tag
+        id: version
+        run: |
+          set -euo pipefail
+          if ! [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Expected a semantic version tag (refs/tags/vX.Y.Z), got: $GITHUB_REF" >&2
+            exit 1
+          fi
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Calculate SHA256
+        id: sha
+        run: |
+          set -euo pipefail
+          SHA256_RE='^[a-f0-9]{64}$'
+          darwin_x86_64=$(shasum  -a 256 artifacts/geoengine-darwin-x86_64/geoengine-darwin-x86_64.tar.gz   | cut -d' ' -f1)
+          darwin_aarch64=$(shasum -a 256 artifacts/geoengine-darwin-aarch64/geoengine-darwin-aarch64.tar.gz | cut -d' ' -f1)
+          linux_x86_64=$(shasum   -a 256 artifacts/geoengine-linux-x86_64/geoengine-linux-x86_64.tar.gz     | cut -d' ' -f1)
+          linux_aarch64=$(shasum  -a 256 artifacts/geoengine-linux-aarch64/geoengine-linux-aarch64.tar.gz   | cut -d' ' -f1)
+          for var_name in darwin_x86_64 darwin_aarch64 linux_x86_64 linux_aarch64; do
+            val="${!var_name}"
+            if [[ -z "$val" ]] || ! [[ "$val" =~ $SHA256_RE ]]; then
+              echo "ERROR: SHA256 for $var_name is invalid or empty: '$val'" >&2
+              exit 1
+            fi
+          done
+          echo "darwin_x86_64=$darwin_x86_64"   >> "$GITHUB_OUTPUT"
+          echo "darwin_aarch64=$darwin_aarch64" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64=$linux_x86_64"     >> "$GITHUB_OUTPUT"
+          echo "linux_aarch64=$linux_aarch64"   >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: NikaGeospatial/homebrew-geoengine
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-geoengine
+
+      - name: Update formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DARWIN_X86_64: ${{ steps.sha.outputs.darwin_x86_64 }}
+          DARWIN_AARCH64: ${{ steps.sha.outputs.darwin_aarch64 }}
+          LINUX_X86_64: ${{ steps.sha.outputs.linux_x86_64 }}
+          LINUX_AARCH64: ${{ steps.sha.outputs.linux_aarch64 }}
+        run: |
+          set -euo pipefail
+          FORMULA="homebrew-geoengine/Formula/geoengine.rb"
+
+          # Update version
+          sed -i "s/version \"[^\"]*\"/version \"${VERSION}\"/" "$FORMULA"
+          grep -q "version \"${VERSION}\"" "$FORMULA" || { echo "ERROR: version replacement failed in formula" >&2; exit 1; }
+
+          # Update SHA256 values: match the URL line then replace sha256 on the next line
+          sed -i "/geoengine-darwin-x86_64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${DARWIN_X86_64}\"/;}" "$FORMULA"
+          grep -q "sha256 \"${DARWIN_X86_64}\"" "$FORMULA" || { echo "ERROR: SHA256 replacement failed for darwin-x86_64" >&2; exit 1; }
+          sed -i "/geoengine-darwin-aarch64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${DARWIN_AARCH64}\"/;}" "$FORMULA"
+          grep -q "sha256 \"${DARWIN_AARCH64}\"" "$FORMULA" || { echo "ERROR: SHA256 replacement failed for darwin-aarch64" >&2; exit 1; }
+          sed -i "/geoengine-linux-x86_64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${LINUX_X86_64}\"/;}" "$FORMULA"
+          grep -q "sha256 \"${LINUX_X86_64}\"" "$FORMULA" || { echo "ERROR: SHA256 replacement failed for linux-x86_64" >&2; exit 1; }
+          sed -i "/geoengine-linux-aarch64\.tar\.gz/,/sha256/{s/sha256 \"[a-f0-9]\{64\}\"/sha256 \"${LINUX_AARCH64}\"/;}" "$FORMULA"
+          grep -q "sha256 \"${LINUX_AARCH64}\"" "$FORMULA" || { echo "ERROR: SHA256 replacement failed for linux-aarch64" >&2; exit 1; }
+
+      - name: Commit and push
+        run: |
+          cd homebrew-geoengine
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/geoengine.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "geoengine ${{ steps.version.outputs.version }}"
+          git push
