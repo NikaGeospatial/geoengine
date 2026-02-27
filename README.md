@@ -507,6 +507,16 @@ Copy-Item -Recurse skills\* "$env:USERPROFILE\.claude\skills\"
 #### Removal of geoengine folder
 You can proceed to delete the `geoengine` folder that was generated from this step.
 
+#### Checking of skills
+Prompt the agent with the following prompt:
+```text
+What skills do you have?
+```
+
+If the agent returns a message that displays the skills shown [above](#available-skills), skills are correctly implemented.
+
+If the agent does not show those skills available, ensure the skills are in the specific folder, and restart your agent.
+
 ### Using Skills
 After copying the folder, the skills should be made available to the agent. Allow the agent access to the directory that
 contains your script, then prompt the agent your needs. For example (in `examples/synthetic-hotspot-analysis`):
