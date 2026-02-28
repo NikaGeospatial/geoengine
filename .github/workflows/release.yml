@@ -10,8 +10,79 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    name: Update Cargo.toml version
+    runs-on: ubuntu-latest
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'push' || github.event.created == true) }}
+    env:
+      CARGO_EDIT_VERSION: "0.13.7"
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate release commit is current main
+        run: |
+          bash .github/scripts/validate-release-main.sh "Release drift detected"
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Canonical SemVer 2.0.0 regex adapted for Bash ERE (no non-capturing groups).
+          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          if ! [[ "$VERSION" =~ $SEMVER_RE ]]; then
+            echo "ERROR: Could not extract valid semver from tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo-edit
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-set-version
+            ~/.cargo/registry
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: ${{ runner.os }}-cargo-edit-${{ env.CARGO_EDIT_VERSION }}
+
+      - name: Install cargo-edit
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-set-version >/dev/null 2>&1; then
+            cargo install cargo-edit --locked --version "${CARGO_EDIT_VERSION}"
+          fi
+
+      - name: Update version in Cargo.toml
+        run: cargo set-version ${{ steps.version.outputs.version }}
+
+      - name: Commit and push to main, move tag
+        run: |
+          set -euo pipefail
+          bash .github/scripts/validate-release-main.sh "Release drift detected before push/tag update"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          [ -f Cargo.lock ] && git add Cargo.lock
+          if git diff --cached --quiet; then
+            echo "Cargo.toml already up to date" 
+          else
+            git commit -m "chore: bump Cargo.toml version to ${{ steps.version.outputs.version }}"
+            git push origin main
+          fi
+          # Move the tag to the new commit so builds use the bumped Cargo.toml
+          git tag -f "$GITHUB_REF_NAME"
+          git push origin --force-with-lease "refs/tags/$GITHUB_REF_NAME"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: prepare
+    if: ${{ github.ref_type == 'tag' && (github.event_name != 'push' || github.event.created == true) && always() && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -39,8 +110,10 @@ jobs:
             name: geoengine-windows-x86_64
 
     steps:
-      - name: Checkout
+      - name: Checkout tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -91,9 +164,12 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    if: ${{ github.ref_type == 'tag' && (github.event_name != 'push' || github.event.created == true) }}
     steps:
-      - name: Checkout
+      - name: Checkout tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -111,7 +187,7 @@ jobs:
             artifacts/**/*.zip
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -119,13 +195,13 @@ jobs:
     name: Update Homebrew Tap
     needs: release
     runs-on: ubuntu-latest
-    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc') }}
+    if: ${{ github.ref_type == 'tag' && (github.event_name != 'push' || github.event.created == true) && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && !contains(github.ref_name, '+') }}
     steps:
       - name: Get version from tag
         id: version
         run: |
           set -euo pipefail
-          if ! [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if ! [[ "$GITHUB_REF" =~ ^refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
             echo "ERROR: Expected a semantic version tag (refs/tags/vX.Y.Z), got: $GITHUB_REF" >&2
             exit 1
           fi
@@ -141,10 +217,10 @@ jobs:
         run: |
           set -euo pipefail
           SHA256_RE='^[a-f0-9]{64}$'
-          darwin_x86_64=$(shasum  -a 256 artifacts/geoengine-darwin-x86_64/geoengine-darwin-x86_64.tar.gz   | cut -d' ' -f1)
-          darwin_aarch64=$(shasum -a 256 artifacts/geoengine-darwin-aarch64/geoengine-darwin-aarch64.tar.gz | cut -d' ' -f1)
-          linux_x86_64=$(shasum   -a 256 artifacts/geoengine-linux-x86_64/geoengine-linux-x86_64.tar.gz     | cut -d' ' -f1)
-          linux_aarch64=$(shasum  -a 256 artifacts/geoengine-linux-aarch64/geoengine-linux-aarch64.tar.gz   | cut -d' ' -f1)
+          darwin_x86_64=$(sha256sum artifacts/geoengine-darwin-x86_64/geoengine-darwin-x86_64.tar.gz   | cut -d' ' -f1)
+          darwin_aarch64=$(sha256sum artifacts/geoengine-darwin-aarch64/geoengine-darwin-aarch64.tar.gz | cut -d' ' -f1)
+          linux_x86_64=$(sha256sum artifacts/geoengine-linux-x86_64/geoengine-linux-x86_64.tar.gz            | cut -d' ' -f1)
+          linux_aarch64=$(sha256sum artifacts/geoengine-linux-aarch64/geoengine-linux-aarch64.tar.gz         | cut -d' ' -f1)
           for var_name in darwin_x86_64 darwin_aarch64 linux_x86_64 linux_aarch64; do
             val="${!var_name}"
             if [[ -z "$val" ]] || ! [[ "$val" =~ $SHA256_RE ]]; then
