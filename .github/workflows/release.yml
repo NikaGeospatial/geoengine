@@ -14,6 +14,8 @@ jobs:
     name: Update Cargo.toml version
     runs-on: ubuntu-latest
     if: ${{ startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'push' || github.event.created == true) }}
+    env:
+      CARGO_EDIT_VERSION: "0.13.7"
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -24,20 +26,7 @@ jobs:
 
       - name: Validate release commit is current main
         run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          main_sha="$(git rev-parse origin/main)"
-          release_sha="${GITHUB_SHA}"
-          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
-            git fetch --no-tags origin "${GITHUB_REF}"
-            release_sha="$(git rev-parse FETCH_HEAD^{commit})"
-          fi
-          echo "origin/main=${main_sha}"
-          echo "release=${release_sha}"
-          if [[ "$main_sha" != "$release_sha" ]]; then
-            echo "ERROR: Release drift detected. origin/main ($main_sha) does not match release commit ($release_sha)." >&2
-            exit 1
-          fi
+          bash .github/scripts/validate-release-main.sh "Release drift detected"
 
       - name: Extract version from tag
         id: version
@@ -52,8 +41,22 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Cache cargo-edit
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-set-version
+            ~/.cargo/registry
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: ${{ runner.os }}-cargo-edit-${{ env.CARGO_EDIT_VERSION }}
+
       - name: Install cargo-edit
-        run: cargo install cargo-edit --locked
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-set-version >/dev/null 2>&1; then
+            cargo install cargo-edit --locked --version "${CARGO_EDIT_VERSION}"
+          fi
 
       - name: Update version in Cargo.toml
         run: cargo set-version ${{ steps.version.outputs.version }}
@@ -61,17 +64,7 @@ jobs:
       - name: Commit and push to main, move tag
         run: |
           set -euo pipefail
-          git fetch --no-tags origin main
-          main_sha="$(git rev-parse origin/main)"
-          release_sha="${GITHUB_SHA}"
-          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
-            git fetch --no-tags origin "${GITHUB_REF}"
-            release_sha="$(git rev-parse FETCH_HEAD^{commit})"
-          fi
-          if [[ "$main_sha" != "$release_sha" ]]; then
-            echo "ERROR: Release drift detected before push/tag update. origin/main ($main_sha) does not match release commit ($release_sha)." >&2
-            exit 1
-          fi
+          bash .github/scripts/validate-release-main.sh "Release drift detected before push/tag update"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml
@@ -223,8 +216,8 @@ jobs:
           SHA256_RE='^[a-f0-9]{64}$'
           darwin_x86_64=$(shasum  -a 256 artifacts/geoengine-darwin-x86_64/geoengine-darwin-x86_64.tar.gz   | cut -d' ' -f1)
           darwin_aarch64=$(shasum -a 256 artifacts/geoengine-darwin-aarch64/geoengine-darwin-aarch64.tar.gz | cut -d' ' -f1)
-          linux_x86_64=$(shasum   -a 256 artifacts/geoengine-linux-x86_64/geoengine-linux-x86_64.tar.gz     | cut -d' ' -f1)
-          linux_aarch64=$(shasum  -a 256 artifacts/geoengine-linux-aarch64/geoengine-linux-aarch64.tar.gz   | cut -d' ' -f1)
+          linux_x86_64=$(sha256sum artifacts/geoengine-linux-x86_64/geoengine-linux-x86_64.tar.gz            | cut -d' ' -f1)
+          linux_aarch64=$(sha256sum artifacts/geoengine-linux-aarch64/geoengine-linux-aarch64.tar.gz         | cut -d' ' -f1)
           for var_name in darwin_x86_64 darwin_aarch64 linux_x86_64 linux_aarch64; do
             val="${!var_name}"
             if [[ -z "$val" ]] || ! [[ "$val" =~ $SHA256_RE ]]; then
