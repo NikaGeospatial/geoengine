@@ -75,9 +75,14 @@ jobs:
             git commit -m "chore: bump Cargo.toml version to ${{ steps.version.outputs.version }}"
             git push origin main
           fi
+          old_tag_sha="${GITHUB_SHA}"
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            git fetch --no-tags origin "${GITHUB_REF}"
+            old_tag_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          fi
           # Move the tag to the new commit so builds use the bumped Cargo.toml
           git tag -f "$GITHUB_REF_NAME"
-          git push origin --force-with-lease "refs/tags/$GITHUB_REF_NAME"
+          git push origin --force-with-lease="refs/tags/$GITHUB_REF_NAME:$old_tag_sha" "refs/tags/$GITHUB_REF_NAME"
 
   build:
     name: Build ${{ matrix.target }}
