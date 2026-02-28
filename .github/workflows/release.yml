@@ -19,7 +19,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate release commit is current main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          main_sha="$(git rev-parse origin/main)"
+          release_sha="${GITHUB_SHA}"
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            git fetch --no-tags origin "${GITHUB_REF}"
+            release_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          fi
+          echo "origin/main=${main_sha}"
+          echo "release=${release_sha}"
+          if [[ "$main_sha" != "$release_sha" ]]; then
+            echo "ERROR: Release drift detected. origin/main ($main_sha) does not match release commit ($release_sha)." >&2
+            exit 1
+          fi
 
       - name: Extract version from tag
         id: version
@@ -43,6 +61,17 @@ jobs:
       - name: Commit and push to main, move tag
         run: |
           set -euo pipefail
+          git fetch --no-tags origin main
+          main_sha="$(git rev-parse origin/main)"
+          release_sha="${GITHUB_SHA}"
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            git fetch --no-tags origin "${GITHUB_REF}"
+            release_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          fi
+          if [[ "$main_sha" != "$release_sha" ]]; then
+            echo "ERROR: Release drift detected before push/tag update. origin/main ($main_sha) does not match release commit ($release_sha)." >&2
+            exit 1
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml
