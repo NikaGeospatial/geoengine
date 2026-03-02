@@ -6,6 +6,7 @@ pub mod worker;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use crate::utils::geoengine::check_for_update;
 
 #[derive(Parser)]
 #[command(name = "geoengine")]
@@ -136,6 +137,8 @@ enum Commands {
 impl Cli {
     pub async fn execute(self) -> Result<()> {
         let verbose = self.verbose;
+
+        check_for_update().await;
 
         match self.command {
             Commands::Image { command } => command.execute().await,
