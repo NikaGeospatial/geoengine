@@ -324,69 +324,7 @@ Refer to the [Pixi manifest documentation](https://pixi.prefix.dev/latest/refere
 
 ### Configuration Reference
 
-| Field | Type | Required | Description                                           |
-|-------|------|----------|-------------------------------------------------------|
-| `name` | String | Yes      | Worker name (used for image tagging and registration) |
-| `version` | String | Yes      | Worker version                                        |
-| `description` | String | No       | Human-readable description                            |
-| `command` | Object | Yes      | Container command configuration                       |
-| `local_dir_mounts` | Array | No       | Persistent directory mounts                           |
-| `plugins` | Object | No       | GIS plugin flags                                      |
-| `deploy` | Object | No       | Cloud deployment settings                             |
-
-### `command` Section
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `program` | String | Yes | Interpreter or binary (e.g., `python`, `Rscript`) |
-| `script` | String | Yes | Script to run (e.g., `main.py`) |
-| `inputs` | Array | No | Input parameter definitions |
-
-### `command.inputs[]` Items
-
-| Field | Type | Required | Default | Description                                                            |
-|-------|------|----------|---------|------------------------------------------------------------------------|
-| `name` | String | Yes | --      | Parameter name (becomes `--name` flag)                                 |
-| `type` | String | Yes | --      | Parameter type (see below)                                             |
-| `required` | Boolean | No | `true`  | Whether the parameter is required                                      |
-| `default` | Any | No | `null`  | Default value                                                          |
-| `description` | String | No | `null`  | Help text                                                              |
-| `enum_values` | Array | No | `null`  | Valid choices (for `enum` type)                                        |
-| `readonly` | Boolean | No | `true`  | ONLY for file/folder types. Set to `false` for output file/folder paths that the worker writes to. |
-| `filetypes` | Array | No | `null`  | ONLY for `file` type. List of file extensions (e.g., `[".tif", ".geotiff"]`). For input files (`readonly: true`) these are the accepted input formats; for output files (`readonly: false`) these are the formats the script produces. Omit or use `[".*"]` for no restriction. `geoengine run` validates the extension before mounting. |
-
-**Supported Input Types:**
-
-| Type | Description |
-|------|-------------|
-| `file` | File path (mounted into container; use `readonly: false` for output files) |
-| `folder` | Directory path (mounted into container; use `readonly: false` for output folders) |
-| `string` | Text value |
-| `number` | Numeric value |
-| `boolean` | Boolean value |
-| `enum` | Choice from `enum_values` list |
-| `datetime` | Date/time value |
-
-### `local_dir_mounts[]` Items
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `host_path` | String | Yes | -- | Host path (supports `./` for relative paths) |
-| `container_path` | String | Yes | -- | Path inside the container |
-| `readonly` | Boolean | No | `false` | Mount as read-only |
-
-### `plugins` Section
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `arcgis` | Boolean | `false` | Install ArcGIS Pro Python Toolbox plugin on `apply` |
-| `qgis` | Boolean | `false` | Install QGIS Processing plugin on `apply` |
-
-### `deploy` Section
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `tenant_id` | String | `null` | Deployment tenant identifier |
+Refer to the [YAML configuration documentation](docs/YAML_CONFIG.md) for a complete list of configuration file options.
 
 ## GIS Plugin Architecture
 
@@ -526,17 +464,8 @@ Make the function `run_hotspot_analysis_from_files()` from `hotspot_analysis.py`
 The agent will then run the whole process stipulated above automatically, even creating an argument parser if not already available
 in the script.
 
-## Building from Source
-
-```bash
-# Requires Rust 1.70+
-git clone https://github.com/NikaGeospatial/geoengine
-cd geoengine
-cargo build --release
-
-# Binary will be at target/release/geoengine
-```
+## Development Version
+Refer to the [Development Guide](docs/CONTRIBUTING.md) for instructions on setting up a development environment.
 
 ## License
-
 MIT License - see [LICENSE](LICENSE) for details.
