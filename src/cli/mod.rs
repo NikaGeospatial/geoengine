@@ -138,7 +138,11 @@ impl Cli {
     pub async fn execute(self) -> Result<()> {
         let verbose = self.verbose;
 
-        check_for_update().await;
+        tokio::spawn(async {
+            if let Err(error) = check_for_update().await {
+                tracing::debug!("Skipping update check: {}", error);
+            }
+        });
 
         match self.command {
             Commands::Image { command } => command.execute().await,
