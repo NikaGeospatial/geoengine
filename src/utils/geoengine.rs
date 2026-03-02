@@ -58,7 +58,7 @@ pub async fn check_for_update() -> Result<()> {
     };
 
     if latest_version > current_version {
-        println!(
+        eprintln!(
             "\n{}{}{}{}{}{}\n{}\n",
             "⚡ Update available: ".yellow().italic(),
             "v".yellow().bold().italic(),
