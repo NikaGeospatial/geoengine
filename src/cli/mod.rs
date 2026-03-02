@@ -6,6 +6,7 @@ pub mod worker;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use crate::utils::geoengine::check_for_update;
 
 #[derive(Parser)]
 #[command(name = "geoengine")]
@@ -136,6 +137,12 @@ enum Commands {
 impl Cli {
     pub async fn execute(self) -> Result<()> {
         let verbose = self.verbose;
+
+        tokio::spawn(async {
+            if let Err(error) = check_for_update().await {
+                tracing::debug!("Skipping update check: {}", error);
+            }
+        });
 
         match self.command {
             Commands::Image { command } => command.execute().await,
