@@ -117,6 +117,7 @@ pub async fn patch_qgis() -> Result<PluginPatchResult> {
         ("__init__.py",          include_str!("../../plugins/qgis-ge/__init__.py")),
         ("geoengine_plugin.py",  include_str!("../../plugins/qgis-ge/geoengine_plugin.py")),
         ("geoengine_provider.py",include_str!("../../plugins/qgis-ge/geoengine_provider.py")),
+        ("geoengine_widgets.py", include_str!("../../plugins/qgis-ge/geoengine_widgets.py")),
         ("metadata.txt",         include_str!("../../plugins/qgis-ge/metadata.txt")),
     ];
 
@@ -264,6 +265,9 @@ fn write_qgis_plugin(dir: &PathBuf) -> Result<()> {
 
     let provider_content = include_str!("../../plugins/qgis-ge/geoengine_provider.py");
     std::fs::write(dir.join("geoengine_provider.py"), provider_content)?;
+
+    let widgets_content = include_str!("../../plugins/qgis-ge/geoengine_widgets.py");
+    std::fs::write(dir.join("geoengine_widgets.py"), widgets_content)?;
 
     let metadata_content = include_str!("../../plugins/qgis-ge/metadata.txt");
     std::fs::write(dir.join("metadata.txt"), metadata_content)?;

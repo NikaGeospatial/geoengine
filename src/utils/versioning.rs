@@ -26,11 +26,6 @@ pub async fn get_latest_worker_version(worker_name: &str, client: &DockerClient)
         .map(|(_, version_str)| version_str)
 }
 
-pub async fn get_latest_worker_version_clientless(worker_name: &str) -> Option<String> {
-    let client = DockerClient::new().await.ok()?;
-    get_latest_worker_version(worker_name, &client).await
-}
-
 fn semver_regex() -> &'static Regex {
     static SEMVER_RE: OnceLock<Regex> = OnceLock::new();
     SEMVER_RE.get_or_init(|| {

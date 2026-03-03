@@ -51,3 +51,16 @@ Any changes to the code should be followed by a `cargo build` to ensure that the
 
 If you make changes to any config templates, Dockerfile generation, or plugin changes, run `geoengine patch` to update all
 artifacts.
+
+You can also chain the `build` and `patch` commands to speed up development. Use a terminal to run
+```bash
+cargo build && geoengine patch
+```
+
+### 4.1. Making Breaking Changes
+Any changes to config templates that require additional actions in the patch,
+e.g. adding a required state attribute, need to have a migratable patch action.
+
+This can be done by registering a function in `src/cli/patch.rs`. Find the correct stage your action should
+run in, register the function in the list, and then define the function. Refer to the other existing patch actions
+for examples.

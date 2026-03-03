@@ -468,3 +468,13 @@ Refer to the [Development Guide](docs/CONTRIBUTING.md) for instructions on setti
 
 ## License
 MIT License - see [LICENSE](LICENSE) for details.
+
+## Known Issues
+
+### QGIS Plugin
+- [ ] QGIS readonly file inputs currently use a custom widget with a selector of layer and file. Without this, non-geometry
+  files cannot be input, however the UI does look a little clunky now. Until we discover a better way to handle this, this
+  will be a limitation.
+- [ ] GeoEngine saves temporary files are saved as extensionless. However, this can cause some scripts to break as the output file is expected
+  to contain an extension. This is a design decision to support the use of temporary files, but until it is fixed, please try and
+  avoid temporary files.

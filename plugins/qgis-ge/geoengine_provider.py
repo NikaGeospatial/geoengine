@@ -19,7 +19,6 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingContext,
     QgsProcessingFeedback,
-    QgsProcessingParameterMapLayer,
     QgsProcessingParameterString,
     QgsProcessingParameterNumber,
     QgsProcessingParameterBoolean,
@@ -35,6 +34,9 @@ from qgis.core import (
     QgsSettings,
     QgsVectorLayer,
     QgsVectorFileWriter,
+)
+from .geoengine_widgets import (
+    QgsProcessingParameterLayerOrFile
 )
 
 
@@ -237,12 +239,39 @@ class GeoEngineCLIClient:
                         on_output(stripped)
                 if is_cancelled and is_cancelled():
                     process.terminate()
+                    forced_kill = False
                     try:
-                        process.wait(timeout=5)
+                        process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
-                    raise Exception("Job cancelled by user")
+                        forced_kill = True
+
+                    tail_lines = []
+                    if process.stderr:
+                        remaining_stderr = process.stderr.read()
+                        if remaining_stderr:
+                            for raw in remaining_stderr.splitlines():
+                                stripped_tail = raw.strip()
+                                if not stripped_tail:
+                                    continue
+                                tail_lines.append(stripped_tail)
+                                if on_output:
+                                    on_output(stripped_tail)
+
+                    if forced_kill:
+                        detail = (
+                            "geoengine subprocess did not exit after cancellation request "
+                            "and was force-killed"
+                        )
+                    elif tail_lines:
+                        detail = tail_lines[-1]
+                    else:
+                        detail = "no additional cancellation details"
+                    error_msg = f"Job cancelled by user ({detail})"
+                    if on_output:
+                        on_output(f"ERROR: {error_msg}")
+                    raise Exception(error_msg)
 
             process.wait()
 
@@ -468,9 +497,15 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
 
         if param_type == 'file':
             if readonly:
-                # Read-only file inputs are typically geospatial layers; let users
-                # choose an existing layer or browse to an external layer source.
-                param = QgsProcessingParameterMapLayer(name, label, optional=not required)
+                # Read-only file inputs may be geospatial layers or plain files
+                # (e.g. .txt, .csv). Use the custom LayerOrFile widget so users
+                # can pick either a loaded layer or any accepted file path.
+                param = QgsProcessingParameterLayerOrFile(
+                    name,
+                    label,
+                    optional=not required,
+                    filetypes=filetypes,
+                )
             else:
                 param = QgsProcessingParameterFileDestination(
                     name, label,
@@ -808,38 +843,42 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             ".gpkg",
         )
 
-        layer = self.parameterAsLayer(parameters, name, context)
+        layer = self._parameter_as_layer_or_file(parameters, name, context)
         if layer is not None:
             source = None
-            try:
-                source = layer.source()
-            except Exception:
-                source = None
-            if not source and hasattr(layer, 'dataProvider') and layer.dataProvider():
+            if isinstance(layer, str):
+                if os.path.isfile(layer):
+                    source = layer
+            else:
                 try:
-                    source = layer.dataProvider().dataSourceUri()
+                    source = layer.source()
                 except Exception:
                     source = None
-            source_text = str(source or "")
-            # Provider URIs with sublayer selectors (e.g. GeoPackage layername)
-            # should preserve the selected layer, so export instead of stripping.
-            if "|" in source_text:
-                normalized = None
-            else:
-                normalized = self._normalize_local_file_path(source_text)
-            # Only use the file path directly when it already has an extension that
-            # the worker accepts (or when no filetypes restriction is declared).
-            # A no-extension path (QGIS scratch layer) must be exported so the CLI
-            # receives a properly named file in the expected format.
-            if normalized:
-                ext = os.path.splitext(normalized)[1].lower()
-                if ext and (not accepted or ext in accepted):
-                    return {"path": normalized, "temp_dir": None, "exported_temp": False}
-            exported = self._export_layer_to_temp_if_needed(
-                layer, name, context, feedback, vector_suffix=preferred_vector_suffix
-            )
-            if exported:
-                return {"path": exported["path"], "temp_dir": exported["temp_dir"], "exported_temp": True}
+                if not source and hasattr(layer, 'dataProvider') and layer.dataProvider():
+                    try:
+                        source = layer.dataProvider().dataSourceUri()
+                    except Exception:
+                        source = None
+                source_text = str(source or "")
+                # Provider URIs with sublayer selectors (e.g. GeoPackage layername)
+                # should preserve the selected layer, so export instead of stripping.
+                if "|" in source_text:
+                    normalized = None
+                else:
+                    normalized = self._normalize_local_file_path(source_text)
+                # Only use the file path directly when it already has an extension that
+                # the worker accepts (or when no filetypes restriction is declared).
+                # A no-extension path (QGIS scratch layer) must be exported so the CLI
+                # receives a properly named file in the expected format.
+                if normalized:
+                    ext = os.path.splitext(normalized)[1].lower()
+                    if ext and (not accepted or ext in accepted):
+                        return {"path": normalized, "temp_dir": None, "exported_temp": False}
+                exported = self._export_layer_to_temp_if_needed(
+                    layer, name, context, feedback, vector_suffix=preferred_vector_suffix
+                )
+                if exported:
+                    return {"path": exported["path"], "temp_dir": exported["temp_dir"], "exported_temp": True}
             return {"path": str(source) if source else None, "temp_dir": None, "exported_temp": False}
 
         raw_value = parameters.get(name)
@@ -956,6 +995,22 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             dirs.append(normalized)
 
         return dirs
+
+    def _parameter_as_layer_or_file(self, parameters, name, context):
+        value = parameters.get(name)
+        if value is None:
+            return None
+        # Layer widgets may serialize their selection as a layer-id string.
+        # Resolve known project layer ids before treating a string as a path.
+        if isinstance(value, str):
+            layer = QgsProject.instance().mapLayer(value)
+            if layer is not None:
+                return layer
+
+        layer = self.parameterAsLayer(parameters, name, context)
+        if layer is not None:
+            return layer
+        return value
 
     def processAlgorithm(
         self,
