@@ -409,9 +409,11 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         },
     };
 
+    let client = DockerClient::new().await;
+
     if !no_cache && !files_changed {
-        match DockerClient::new().await {
-            Ok(client) => match local_image_exists(&client, &build_image_tag).await {
+        match &client {
+            Ok(client) => match local_image_exists(client, &build_image_tag).await {
                 Ok(true) => {
                     println!(
                         "{} No build-related changes detected for worker '{}'. Nothing to build.",
@@ -443,8 +445,8 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
     }
 
     // --- Version validation (Docker-backed) ---
-    // Initialize Docker only once we know a build may actually run.
-    let client = DockerClient::new().await?;
+    // Reuse the same Docker client initialized above.
+    let client = client?;
     let ver_cmp = compare_worker_version(worker, &new_version, &client).await;
     let version_changed = match ver_cmp {
         Ok(c) => match c {

@@ -7,11 +7,9 @@ import os
 import shutil
 
 import qgis.gui
-from qgis._core import QgsProcessingParameterType
 from qgis.core import QgsApplication
 from qgis.PyQt.QtCore import QFileSystemWatcher
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
-from qgis.PyQt.QtGui import QIcon
 
 from .geoengine_provider import (
     GeoEngineProvider,
