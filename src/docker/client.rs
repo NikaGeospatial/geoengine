@@ -570,8 +570,14 @@ impl DockerClient {
                         -1
                     }
                 }
-            } else {
+            } else if cancel_reason.is_some() {
                 0
+            } else {
+                tracing::warn!(
+                    "Container {} ended without an exit status from wait_container",
+                    container_id
+                );
+                -1
             }
         } else {
             -1
