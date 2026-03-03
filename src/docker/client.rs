@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::container::ContainerConfig;
@@ -72,7 +73,7 @@ impl DockerClient {
                     initial_error
                 );
 
-                Self::try_start_docker_daemon().context(
+                Self::try_start_docker_daemon().await.context(
                     "Failed to start Docker automatically. Please start Docker and try again",
                 )?;
 
@@ -111,12 +112,13 @@ impl DockerClient {
         format!("{:#}", err).to_lowercase().contains("permission denied")
     }
 
-    fn try_start_docker_daemon() -> Result<()> {
+    async fn try_start_docker_daemon() -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            let status = std::process::Command::new("open")
+            let status = Command::new("open")
                 .args(["-a", "Docker"])
                 .status()
+                .await
                 .context("Failed to run `open -a Docker`")?;
 
             if status.success() {
@@ -128,9 +130,10 @@ impl DockerClient {
 
         #[cfg(target_os = "windows")]
         {
-            let status = std::process::Command::new("cmd")
+            let status = Command::new("cmd")
                 .args(["/C", "start", "", "Docker Desktop"])
                 .status()
+                .await
                 .context("Failed to run `cmd /C start \"\" \"Docker Desktop\"`")?;
 
             if status.success() {
@@ -146,26 +149,29 @@ impl DockerClient {
         #[cfg(target_os = "linux")]
         {
             if which::which("systemctl").is_ok() {
-                let desktop = std::process::Command::new("systemctl")
+                let desktop = Command::new("systemctl")
                     .args(["--user", "start", "docker-desktop"])
-                    .status();
-                if matches!(desktop, Ok(status) if status.success()) {
+                    .status()
+                    .await;
+                if matches!(desktop, Ok(s) if s.success()) {
                     return Ok(());
                 }
 
-                let daemon = std::process::Command::new("systemctl")
+                let daemon = Command::new("systemctl")
                     .args(["start", "docker"])
-                    .status();
-                if matches!(daemon, Ok(status) if status.success()) {
+                    .status()
+                    .await;
+                if matches!(daemon, Ok(s) if s.success()) {
                     return Ok(());
                 }
             }
 
             if which::which("service").is_ok() {
-                let service = std::process::Command::new("service")
+                let service = Command::new("service")
                     .args(["docker", "start"])
-                    .status();
-                if matches!(service, Ok(status) if status.success()) {
+                    .status()
+                    .await;
+                if matches!(service, Ok(s) if s.success()) {
                     return Ok(());
                 }
             }
@@ -484,21 +490,7 @@ impl DockerClient {
     ) -> Result<i64> {
         let container_id = self.create_container(config).await?;
 
-        // Start the container
-        if let Err(start_err) = self
-            .docker
-            .start_container(&container_id, None::<StartContainerOptions<String>>)
-            .await
-        {
-            if let Err(remove_err) = self.remove_container(&container_id, true).await {
-                tracing::warn!(
-                    "Failed to remove container {} after start failure: {}",
-                    container_id,
-                    remove_err
-                );
-            }
-            return Err(start_err.into());
-        }
+        self.start_container_with_cleanup(&container_id).await?;
 
         if !logs_to_stderr {
             let command_display = config
@@ -654,7 +646,11 @@ impl DockerClient {
         }
 
         if errors.is_empty() {
-            eprintln!("Container {} cleaned up after cancellation.", container_id);
+            if remove_on_exit {
+                eprintln!("Container {} stopped and removed after cancellation.", container_id);
+            } else {
+                eprintln!("Container {} stopped (not removed) after cancellation.", container_id);
+            }
             Ok(())
         } else {
             anyhow::bail!("{}", errors.join(" | "));
@@ -688,12 +684,23 @@ impl DockerClient {
     pub async fn run_container_detached(&self, config: &ContainerConfig) -> Result<String> {
         let container_id = self.create_container(config).await?;
 
+        self.start_container_with_cleanup(&container_id).await?;
+
+        Ok(container_id)
+    }
+
+    /// Helper to start a container and clean it up if the start fails.
+    async fn start_container_with_cleanup(&self, container_id: &str) -> Result<()> {
         if let Err(start_err) = self
             .docker
-            .start_container(&container_id, None::<StartContainerOptions<String>>)
+            .start_container(container_id, None::<StartContainerOptions<String>>)
             .await
         {
-            if let Err(remove_err) = self.remove_container(&container_id, true).await {
+            tracing::warn!(
+                "Failed to start container {}, attempting cleanup.",
+                container_id
+            );
+            if let Err(remove_err) = self.remove_container(container_id, true).await {
                 tracing::warn!(
                     "Failed to remove container {} after start failure: {}",
                     container_id,
@@ -702,8 +709,7 @@ impl DockerClient {
             }
             return Err(start_err.into());
         }
-
-        Ok(container_id)
+        Ok(())
     }
 
     /// Create a container (helper method)
