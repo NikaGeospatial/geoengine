@@ -169,7 +169,7 @@ impl Cli {
             Commands::Describe { worker, json } => worker::describe_worker(worker.as_deref(), json).await,
             Commands::Diff { file } => worker::diff_worker(file.as_deref()).await,
             Commands::Deploy { command } => command.execute().await,
-            Commands::Patch => patch::patch_all().await,
+            Commands::Patch => patch::patch_all_v2().await,
         }
     }
 }

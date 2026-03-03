@@ -78,7 +78,13 @@ pub fn verify_arcgis_plugin_installed() -> Result<bool> {
 /// Check if the GeoEngine plugin is installed in the QGIS plugin directory.
 pub fn verify_qgis_plugin_installed() -> Result<bool> {
     let qgis_dir = find_qgis_plugin_dir()?.join("geoengine");
-    let qgis_required = ["__init__.py", "geoengine_plugin.py", "geoengine_provider.py", "metadata.txt"];
+    let qgis_required = [
+        "__init__.py",
+        "geoengine_plugin.py",
+        "geoengine_provider.py",
+        "geoengine_widgets.py",
+        "metadata.txt",
+    ];
     let qgis_missing = missing_files(&qgis_dir, &qgis_required);
     Ok(qgis_missing.is_empty())
 }
@@ -117,6 +123,7 @@ pub async fn patch_qgis() -> Result<PluginPatchResult> {
         ("__init__.py",          include_str!("../../plugins/qgis-ge/__init__.py")),
         ("geoengine_plugin.py",  include_str!("../../plugins/qgis-ge/geoengine_plugin.py")),
         ("geoengine_provider.py",include_str!("../../plugins/qgis-ge/geoengine_provider.py")),
+        ("geoengine_widgets.py", include_str!("../../plugins/qgis-ge/geoengine_widgets.py")),
         ("metadata.txt",         include_str!("../../plugins/qgis-ge/metadata.txt")),
     ];
 
@@ -264,6 +271,9 @@ fn write_qgis_plugin(dir: &PathBuf) -> Result<()> {
 
     let provider_content = include_str!("../../plugins/qgis-ge/geoengine_provider.py");
     std::fs::write(dir.join("geoengine_provider.py"), provider_content)?;
+
+    let widgets_content = include_str!("../../plugins/qgis-ge/geoengine_widgets.py");
+    std::fs::write(dir.join("geoengine_widgets.py"), widgets_content)?;
 
     let metadata_content = include_str!("../../plugins/qgis-ge/metadata.txt");
     std::fs::write(dir.join("metadata.txt"), metadata_content)?;

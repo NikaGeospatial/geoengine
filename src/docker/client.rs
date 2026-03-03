@@ -7,7 +7,10 @@ use futures::StreamExt;
 use libc;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::process::Command;
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::container::ContainerConfig;
 
@@ -26,18 +29,162 @@ pub struct ImageInfo {
 }
 
 impl DockerClient {
+    fn extract_build_step(line: &str) -> Option<String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+
+        if let Some(rest) = line.strip_prefix('#') {
+            let rest = rest.trim_start();
+            let split_idx = rest.find(' ')?;
+            let after_id = rest[split_idx + 1..].trim_start();
+
+            if after_id.starts_with('[') && !after_id.contains(" DONE ") {
+                return Some(after_id.to_string());
+            }
+            if after_id.starts_with("building with ") {
+                return Some(after_id.to_string());
+            }
+            return None;
+        }
+
+        if line.starts_with("Step ") {
+            return Some(line.to_string());
+        }
+
+        None
+    }
+
     /// Create a new Docker client
     pub async fn new() -> Result<Self> {
+        match Self::connect_and_ping().await {
+            Ok(docker) => return Ok(Self { docker }),
+            Err(initial_error) => {
+                // Socket permission issues are unlikely to be fixed by auto-starting Docker.
+                if Self::is_permission_denied(&initial_error) {
+                    return Err(initial_error).context(
+                        "Failed to connect to Docker daemon due to permission denied on the Docker socket",
+                    );
+                }
+
+                tracing::debug!(
+                    "Docker daemon unavailable ({}). Attempting to start Docker...",
+                    initial_error
+                );
+
+                Self::try_start_docker_daemon().await.context(
+                    "Failed to start Docker automatically. Please start Docker and try again",
+                )?;
+
+                const MAX_RETRIES: usize = 30;
+                const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+                let mut last_error = initial_error;
+                for _ in 0..MAX_RETRIES {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    match Self::connect_and_ping().await {
+                        Ok(docker) => return Ok(Self { docker }),
+                        Err(err) => last_error = err,
+                    }
+                }
+
+                Err(last_error).context(
+                    "Failed to connect to Docker daemon after attempting automatic startup",
+                )
+            }
+        }
+    }
+
+    async fn connect_and_ping() -> Result<Docker> {
         let docker = Docker::connect_with_local_defaults()
             .context("Failed to connect to Docker daemon. Is Docker running?")?;
 
-        // Verify connection
         docker
             .ping()
             .await
             .context("Failed to ping Docker daemon")?;
 
-        Ok(Self { docker })
+        Ok(docker)
+    }
+
+    fn is_permission_denied(err: &anyhow::Error) -> bool {
+        format!("{:#}", err).to_lowercase().contains("permission denied")
+    }
+
+    async fn try_start_docker_daemon() -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let status = Command::new("open")
+                .args(["-a", "Docker"])
+                .status()
+                .await
+                .context("Failed to run `open -a Docker`")?;
+
+            if status.success() {
+                return Ok(());
+            }
+
+            anyhow::bail!("`open -a Docker` exited with status {:?}", status.code());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let status = Command::new("cmd")
+                .args(["/C", "start", "", "Docker Desktop"])
+                .status()
+                .await
+                .context("Failed to run `cmd /C start \"\" \"Docker Desktop\"`")?;
+
+            if status.success() {
+                return Ok(());
+            }
+
+            anyhow::bail!(
+                "`cmd /C start \"\" \"Docker Desktop\"` exited with status {:?}",
+                status.code()
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if which::which("systemctl").is_ok() {
+                let desktop = Command::new("systemctl")
+                    .args(["--user", "start", "docker-desktop"])
+                    .status()
+                    .await;
+                if matches!(desktop, Ok(s) if s.success()) {
+                    return Ok(());
+                }
+
+                let daemon = Command::new("systemctl")
+                    .args(["start", "docker"])
+                    .status()
+                    .await;
+                if matches!(daemon, Ok(s) if s.success()) {
+                    return Ok(());
+                }
+            }
+
+            if which::which("service").is_ok() {
+                let service = Command::new("service")
+                    .args(["docker", "start"])
+                    .status()
+                    .await;
+                if matches!(service, Ok(s) if s.success()) {
+                    return Ok(());
+                }
+            }
+
+            anyhow::bail!(
+                "Could not auto-start Docker on Linux via systemctl/service. Start Docker manually."
+            );
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            anyhow::bail!("Auto-start Docker is not supported on this operating system.");
+        }
     }
 
     /// Import a Docker image from a tar file
@@ -226,6 +373,7 @@ impl DockerClient {
         build_args: &HashMap<String, String>,
         no_cache: bool,
         verbose: bool,
+        progress_step_tx: Option<UnboundedSender<String>>,
     ) -> Result<()> {
         let mut cmd = std::process::Command::new("docker");
         cmd.args(["build", "-t", tag, "-f"]);
@@ -266,23 +414,38 @@ impl DockerClient {
         let stderr_output = if !verbose {
             let stderr = child.stderr.take();
             if let Some(stderr) = stderr {
-                use tokio::io::AsyncReadExt;
-                let mut reader = tokio::io::BufReader::new(stderr);
-                let mut raw = vec![0u8; MAX_STDERR_BYTES + 1];
-                let mut total = 0usize;
-                loop {
-                    match reader.read(&mut raw[total..]).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            total += n;
-                            if total >= MAX_STDERR_BYTES {
-                                break;
-                            }
+                let step_sender = progress_step_tx;
+                let mut reader = tokio::io::BufReader::new(stderr).lines();
+                let mut raw = Vec::with_capacity(MAX_STDERR_BYTES + 1);
+
+                while let Some(line) = reader
+                    .next_line()
+                    .await
+                    .context("Failed to read docker build output")?
+                {
+                    let trimmed = line.trim_end_matches('\r');
+
+                    if let Some(step) = Self::extract_build_step(trimmed) {
+                        if let Some(tx) = step_sender.as_ref() {
+                            let _ = tx.send(step);
                         }
                     }
+
+                    if raw.len() <= MAX_STDERR_BYTES {
+                        if !raw.is_empty() {
+                            raw.push(b'\n');
+                        }
+                        let bytes = trimmed.as_bytes();
+                        let remaining = (MAX_STDERR_BYTES + 1).saturating_sub(raw.len());
+                        let take = remaining.min(bytes.len());
+                        raw.extend_from_slice(&bytes[..take]);
+                    }
                 }
-                let truncated = total > MAX_STDERR_BYTES;
-                let mut s = String::from_utf8_lossy(&raw[..total.min(MAX_STDERR_BYTES)]).into_owned();
+
+                drop(step_sender);
+
+                let truncated = raw.len() > MAX_STDERR_BYTES;
+                let mut s = String::from_utf8_lossy(&raw[..raw.len().min(MAX_STDERR_BYTES)]).into_owned();
                 if truncated {
                     s.push_str("\n...(truncated)");
                 }
@@ -311,88 +474,34 @@ impl DockerClient {
 
     /// Run a container and wait for it to complete (attached mode)
     pub async fn run_container_attached(&self, config: &ContainerConfig) -> Result<i64> {
-        let container_id = self.create_container(config).await?;
-
-        // Start the container
-        self.docker
-            .start_container(&container_id, None::<StartContainerOptions<String>>)
-            .await?;
-        
-        let command_display = config
-            .command
-            .as_ref()
-            .map(|cmd| cmd.join(" "))
-            .unwrap_or_else(|| "<none>".to_string());
-        println!("Container command: {}", command_display);
-
-        // Stream logs
-        let log_options = LogsOptions::<String> {
-            follow: true,
-            stdout: true,
-            stderr: true,
-            ..Default::default()
-        };
-
-        let mut log_stream = self.docker.logs(&container_id, Some(log_options));
-
-        while let Some(result) = log_stream.next().await {
-            match result {
-                Ok(output) => {
-                    print!("{}", output);
-                }
-                Err(e) => {
-                    tracing::warn!("Log stream error: {}", e);
-                    break;
-                }
-            }
-        }
-
-        // Wait for container to finish
-        let wait_options = WaitContainerOptions {
-            condition: "not-running",
-        };
-
-        let mut wait_stream = self.docker.wait_container(&container_id, Some(wait_options));
-        let exit_code = if let Some(result) = wait_stream.next().await {
-            match result {
-                Ok(response) => response.status_code,
-                Err(e) => {
-                    tracing::warn!("Wait error: {}", e);
-                    -1
-                }
-            }
-        } else {
-            0
-        };
-
-        // Remove container if requested
-        if config.remove_on_exit {
-            self.docker
-                .remove_container(
-                    &container_id,
-                    Some(bollard::container::RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await
-                .ok();
-        }
-
-        Ok(exit_code)
+        self.run_container_attached_internal(config, false).await
     }
 
     /// Run a container attached, routing all container output to host stderr.
     /// This keeps host stdout free for structured output (e.g. JSON results).
     pub async fn run_container_attached_to_stderr(&self, config: &ContainerConfig) -> Result<i64> {
+        self.run_container_attached_internal(config, true).await
+    }
+
+    async fn run_container_attached_internal(
+        &self,
+        config: &ContainerConfig,
+        logs_to_stderr: bool,
+    ) -> Result<i64> {
         let container_id = self.create_container(config).await?;
 
-        // Start the container
-        self.docker
-            .start_container(&container_id, None::<StartContainerOptions<String>>)
-            .await?;
+        self.start_container_with_cleanup(&container_id).await?;
 
-        // Stream logs to stderr
+        if !logs_to_stderr {
+            let command_display = config
+                .command
+                .as_ref()
+                .map(|cmd| cmd.join(" "))
+                .unwrap_or_else(|| "<none>".to_string());
+            println!("Container command: {}", command_display);
+        }
+
+        // Stream logs until completion or cancellation signal.
         let log_options = LogsOptions::<String> {
             follow: true,
             stdout: true,
@@ -401,63 +510,206 @@ impl DockerClient {
         };
 
         let mut log_stream = self.docker.logs(&container_id, Some(log_options));
+        let mut shutdown_signal = Box::pin(Self::wait_for_shutdown_signal());
+        let mut cancel_reason: Option<&'static str> = None;
 
-        while let Some(result) = log_stream.next().await {
-            match result {
-                Ok(output) => {
-                    eprint!("{}", output);
-                }
-                Err(e) => {
-                    tracing::warn!("Log stream error: {}", e);
+        loop {
+            tokio::select! {
+                signal = &mut shutdown_signal => {
+                    cancel_reason = Some(signal?);
                     break;
                 }
-            }
-        }
-
-        // Wait for container to finish
-        let wait_options = WaitContainerOptions {
-            condition: "not-running",
-        };
-
-        let mut wait_stream = self.docker.wait_container(&container_id, Some(wait_options));
-        let exit_code = if let Some(result) = wait_stream.next().await {
-            match result {
-                Ok(response) => response.status_code,
-                Err(e) => {
-                    tracing::warn!("Wait error: {}", e);
-                    -1
+                result = log_stream.next() => {
+                    let Some(result) = result else {
+                        break;
+                    };
+                    match result {
+                        Ok(output) => {
+                            if logs_to_stderr {
+                                eprint!("{}", output);
+                            } else {
+                                print!("{}", output);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Log stream error: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
-        } else {
-            0
-        };
-
-        // Remove container if requested
-        if config.remove_on_exit {
-            self.docker
-                .remove_container(
-                    &container_id,
-                    Some(bollard::container::RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await
-                .ok();
         }
 
+        let exit_code = if cancel_reason.is_none() {
+            let wait_options = WaitContainerOptions {
+                condition: "not-running",
+            };
+
+            let mut wait_stream = self.docker.wait_container(&container_id, Some(wait_options));
+            let wait_result = tokio::select! {
+                signal = &mut shutdown_signal => {
+                    cancel_reason = Some(signal?);
+                    None
+                }
+                result = wait_stream.next() => result
+            };
+
+            if let Some(result) = wait_result {
+                match result {
+                    Ok(response) => response.status_code,
+                    Err(e) => {
+                        tracing::warn!("Wait error: {}", e);
+                        -1
+                    }
+                }
+            } else if cancel_reason.is_some() {
+                0
+            } else {
+                tracing::warn!(
+                    "Container {} ended without an exit status from wait_container",
+                    container_id
+                );
+                -1
+            }
+        } else {
+            -1
+        };
+
+        if let Some(reason) = cancel_reason {
+            let cleanup_result = self
+                .cleanup_container_after_cancellation(&container_id, config.remove_on_exit, reason)
+                .await;
+            if let Err(err) = cleanup_result {
+                anyhow::bail!("Run cancelled ({reason}). Container cleanup error: {err}");
+            }
+            anyhow::bail!("Run cancelled ({reason})");
+        }
+
+        self.cleanup_container_on_exit(&container_id, config.remove_on_exit)
+            .await;
+
         Ok(exit_code)
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_shutdown_signal() -> Result<&'static str> {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())
+            .context("Failed to subscribe to SIGTERM")?;
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => {
+                res.context("Failed while waiting for Ctrl-C")?;
+                Ok("SIGINT")
+            }
+            _ = sigterm.recv() => Ok("SIGTERM"),
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn wait_for_shutdown_signal() -> Result<&'static str> {
+        tokio::signal::ctrl_c()
+            .await
+            .context("Failed while waiting for Ctrl-C")?;
+        Ok("Ctrl-C")
+    }
+
+    async fn cleanup_container_after_cancellation(
+        &self,
+        container_id: &str,
+        remove_on_exit: bool,
+        reason: &str,
+    ) -> Result<()> {
+        eprintln!(
+            "Cancellation signal ({}) received. Stopping container {}...",
+            reason,
+            container_id
+        );
+
+        let mut errors: Vec<String> = Vec::new();
+
+        if let Err(err) = self.stop_container(container_id).await {
+            let msg = format!("Failed to stop container {}: {}", container_id, err);
+            eprintln!("{}", msg);
+            if !Self::is_benign_stop_or_remove_error(&err) {
+                errors.push(msg);
+            }
+        }
+
+        if remove_on_exit {
+            if let Err(err) = self.remove_container(container_id, true).await {
+                let msg = format!("Failed to remove container {}: {}", container_id, err);
+                eprintln!("{}", msg);
+                if !Self::is_benign_stop_or_remove_error(&err) {
+                    errors.push(msg);
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            if remove_on_exit {
+                eprintln!("Container {} stopped and removed after cancellation.", container_id);
+            } else {
+                eprintln!("Container {} stopped (not removed) after cancellation.", container_id);
+            }
+            Ok(())
+        } else {
+            anyhow::bail!("{}", errors.join(" | "));
+        }
+    }
+
+    async fn cleanup_container_on_exit(&self, container_id: &str, remove_on_exit: bool) {
+        if !remove_on_exit {
+            return;
+        }
+
+        if let Err(err) = self.remove_container(container_id, true).await {
+            tracing::warn!(
+                "Failed to remove container {} after exit: {}",
+                container_id,
+                err
+            );
+        }
+    }
+
+    fn is_benign_stop_or_remove_error(err: &anyhow::Error) -> bool {
+        let msg = format!("{:#}", err).to_ascii_lowercase();
+        msg.contains("is not running")
+            || msg.contains("already stopped")
+            || msg.contains("no such container")
+            || msg.contains("not found")
+            || msg.contains("404")
     }
 
     /// Run a container in detached mode
     pub async fn run_container_detached(&self, config: &ContainerConfig) -> Result<String> {
         let container_id = self.create_container(config).await?;
 
-        self.docker
-            .start_container(&container_id, None::<StartContainerOptions<String>>)
-            .await?;
+        self.start_container_with_cleanup(&container_id).await?;
 
         Ok(container_id)
+    }
+
+    /// Helper to start a container and clean it up if the start fails.
+    async fn start_container_with_cleanup(&self, container_id: &str) -> Result<()> {
+        if let Err(start_err) = self
+            .docker
+            .start_container(container_id, None::<StartContainerOptions<String>>)
+            .await
+        {
+            tracing::warn!(
+                "Failed to start container {}, attempting cleanup.",
+                container_id
+            );
+            if let Err(remove_err) = self.remove_container(container_id, true).await {
+                tracing::warn!(
+                    "Failed to remove container {} after start failure: {}",
+                    container_id,
+                    remove_err
+                );
+            }
+            return Err(start_err.into());
+        }
+        Ok(())
     }
 
     /// Create a container (helper method)

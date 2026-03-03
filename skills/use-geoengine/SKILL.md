@@ -15,6 +15,13 @@ GeoEngine is a Docker-based isolated runtime manager for geospatial workloads.
 It packages a user's script (Python or R) into a reproducible Docker image and
 exposes it to GIS plugins (QGIS, ArcGIS) or direct CLI invocation.
 
+**It is important to note that any time you see an available update for GeoEngine**
+(this appears in the CLI output whenever you run any commands, if there is an update, there
+should be a message that starts with "⚡ Update available:")
+**, prompt the user to update GeoEngine and then run `geoengine patch` before continuing.**
+If the user does not want to update GeoEngine, just proceed with the usage of the local
+version of GeoEngine but remind the user with every prompt that GeoEngine has an update.
+
 ---
 
 ## Workflow Routing

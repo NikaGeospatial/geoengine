@@ -114,12 +114,39 @@ class GeoEngineClient:
                         on_output(stripped)
                 if is_cancelled and is_cancelled():
                     process.terminate()
+                    forced_kill = False
                     try:
-                        process.wait(timeout=5)
+                        process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
-                    raise Exception("Job cancelled by user")
+                        forced_kill = True
+
+                    tail_lines = []
+                    if process.stderr:
+                        remaining_stderr = process.stderr.read()
+                        if remaining_stderr:
+                            for raw in remaining_stderr.splitlines():
+                                stripped_tail = raw.strip()
+                                if not stripped_tail:
+                                    continue
+                                tail_lines.append(stripped_tail)
+                                if on_output:
+                                    on_output(stripped_tail)
+
+                    if forced_kill:
+                        detail = (
+                            "geoengine subprocess did not exit after cancellation request "
+                            "and was force-killed"
+                        )
+                    elif tail_lines:
+                        detail = tail_lines[-1]
+                    else:
+                        detail = "no additional cancellation details"
+                    error_msg = f"Job cancelled by user ({detail})"
+                    if on_output:
+                        on_output(f"ERROR: {error_msg}")
+                    raise Exception(error_msg)
 
             process.wait()
 

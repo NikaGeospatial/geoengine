@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use crate::cli::plugins;
 use crate::cli::plugins::{verify_arcgis_plugin_installed, verify_qgis_plugin_installed};
 use crate::config::pixi::PixiConfig;
 use crate::docker::dockerfile;
-use crate::utils::versioning::{compare_versions, validate_version, get_latest_worker_version_clientless, get_latest_worker_version, compare_worker_version};
+use crate::utils::versioning::{compare_versions, validate_version, get_latest_worker_version, compare_worker_version};
 // ---------------------------------------------------------------------------
 // JSON output structs (used by --json flags and plugin integration)
 // ---------------------------------------------------------------------------
@@ -347,47 +347,27 @@ pub async fn build_worker_local(no_cache: bool, dev: bool, build_args: &[String]
     build_worker(&worker_name, no_cache, dev, build_args, verbose).await
 }
 
+async fn local_image_exists(client: &DockerClient, image_name: &str) -> Result<bool> {
+    let images = client
+        .list_images(Some(image_name), true)
+        .await
+        .with_context(|| format!("Failed to verify local image '{}'", image_name))?;
+
+    Ok(images
+        .into_iter()
+        .any(|image| image.repo_tags.into_iter().any(|tag| tag == image_name)))
+}
+
 pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &[String], verbose: bool) -> Result<()> {
     let settings = Settings::load()?;
     let worker_path = settings.get_worker_path(worker)?;
     let config = yaml_store::load_saved_config(worker)?;
 
-    let client = DockerClient::new().await?;
-
     let new_version = config.version.clone();
-
-    // --- Version validation ---
-    let ver_cmp = compare_worker_version(worker, &new_version, &client).await;
-    let version_changed = match ver_cmp {
-        Ok(c) => match c {
-            Ordering::Less => {
-                let latest_built = get_latest_worker_version(worker, &client).await.unwrap_or_default();
-                if dev {
-                    println!("{} Version is lower than latest built version: {} < {}", "!".yellow().bold(), new_version, latest_built);
-                    println!("{} Correct it before your next push.", " ");
-                } else {
-                    anyhow::bail!("{}\n{}: {}\n{}: {}",
-                        "New version cannot be lower than latest built version!".red().bold(),
-                        "New version  ",
-                        new_version,
-                        "Built version",
-                        latest_built
-                    );
-                }
-                true
-            },
-            Ordering::Equal => false,
-            Ordering::Greater => true
-        },
-        Err(e) => {
-            if dev {
-                println!("{} {}", "!".yellow().bold(), e);
-                println!("{} Correct it before your next push.", " ");
-                true
-            } else {
-                anyhow::bail!(e.red().bold());
-            }
-        }
+    let build_image_tag = if dev {
+        format!("geoengine-local-dev/{}:latest", config.name)
+    } else {
+        format!("geoengine-local/{}:{}", config.name, new_version)
     };
 
     // --- File change detection ---
@@ -429,43 +409,83 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         },
     };
 
-    if !no_cache {
-        match (version_changed, files_changed) {
-            (true, false) => {
-                // Version bumped but no file changes — skip rebuild
-                println!(
-                    "{} {}o build-related files have been modified. Skipping rebuild.",
-                    "!".yellow().bold(),
-                    match dev {
-                        true => "N".to_string(),
-                        false => format!("Version changed to '{}', but n", new_version.cyan()),
-                    },
-                );
-                return Ok(());
-            },
-            (false, true) => {
-                // Files changed but version not bumped — ask user to increment
-                if !dev {
-                    anyhow::bail!(
-                        "{}\n  Build-related files have changed, but the version ('{}') has not been incremented.\n  Please bump the version in geoengine.yaml before rebuilding.",
-                        "Cannot rebuild without a version increment.".red().bold(),
-                        new_version
+    let client = DockerClient::new().await;
+
+    if !no_cache && !files_changed {
+        match &client {
+            Ok(client) => match local_image_exists(client, &build_image_tag).await {
+                Ok(true) => {
+                    println!(
+                        "{} No build-related changes detected for worker '{}'. Nothing to build.",
+                        "✓".green().bold(),
+                        worker.cyan()
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {
+                    println!(
+                        "{} Cached image '{}' was not found locally. Rebuilding.",
+                        "!".yellow().bold(),
+                        build_image_tag.as_str().cyan()
                     );
                 }
+                Err(e) => {
+                    println!("{} {}. Rebuilding.", "!".yellow().bold(), e);
+                }
             },
-            (false, false) => {
-                // Nothing changed at all
+            Err(e) => {
                 println!(
-                    "{} No changes detected for worker '{}'. Nothing to build.",
-                    "✓".green().bold(),
-                    worker.cyan()
+                    "{} Could not verify cached image '{}': {}. Attempting rebuild.",
+                    "!".yellow().bold(),
+                    build_image_tag.as_str().cyan(),
+                    e
                 );
-                return Ok(());
-            },
-            (true, true) => {
-                // Both changed — proceed with build
             }
         }
+    }
+
+    // --- Version validation (Docker-backed) ---
+    // Reuse the same Docker client initialized above.
+    let client = client?;
+    let ver_cmp = compare_worker_version(worker, &new_version, &client).await;
+    let version_changed = match ver_cmp {
+        Ok(c) => match c {
+            Ordering::Less => {
+                let latest_built = get_latest_worker_version(worker, &client).await.unwrap_or_default();
+                if dev {
+                    println!("{} Version is lower than latest built version: {} < {}", "!".yellow().bold(), new_version, latest_built);
+                    println!("{} Correct it before your next push.", " ");
+                } else {
+                    anyhow::bail!("{}\n{}: {}\n{}: {}",
+                        "New version cannot be lower than latest built version!".red().bold(),
+                        "New version  ",
+                        new_version,
+                        "Built version",
+                        latest_built
+                    );
+                }
+                true
+            },
+            Ordering::Equal => false,
+            Ordering::Greater => true
+        },
+        Err(e) => {
+            if dev {
+                println!("{} {}", "!".yellow().bold(), e);
+                println!("{} Correct it before your next push.", " ");
+                true
+            } else {
+                anyhow::bail!(e.red().bold());
+            }
+        }
+    };
+
+    if !no_cache && files_changed && !dev && !version_changed {
+        anyhow::bail!(
+            "{}\n  Build-related files have changed, but the version ('{}') has not been incremented.\n  Please bump the version in geoengine.yaml before rebuilding.",
+            "Cannot rebuild without a version increment.".red().bold(),
+            new_version
+        );
     }
 
     // --- Build ---
@@ -476,17 +496,11 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
     );
 
     let context = worker_path.clone();
-    let image_tag = format!("geoengine-local{}/{}:{}",
-        match dev {
-            true => "-dev",
-            false => ""
-        },
-        config.name,
-        match dev {
-            true => "latest".to_string(),
-            false => new_version
-        })
-    ;
+    let image_tag = if dev {
+        prev_state.as_ref().and_then(|s| s.image_tag.clone())
+    } else {
+        Some(build_image_tag.clone())
+    };
 
     // Parse build args from CLI only
     let mut args: HashMap<String, String> = HashMap::new();
@@ -497,30 +511,63 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         }
     }
 
-    let pb = if verbose {
-        None
+    let (pb, step_pb, step_task, progress_step_tx) = if verbose {
+        (None, None, None, None)
     } else {
-        let pb = ProgressBar::new_spinner();
+        let mp = MultiProgress::new();
+
+        let pb = mp.add(ProgressBar::new_spinner());
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} {msg}")?,
         );
         pb.set_message("Building image...");
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        Some(pb)
+
+        let step_pb = mp.add(ProgressBar::new_spinner());
+        step_pb.set_style(ProgressStyle::with_template("  {msg}")?);
+        step_pb.set_message(" ");
+
+        let (progress_step_tx, mut progress_step_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
+        let step_pb_clone = step_pb.clone();
+        let step_task = tokio::spawn(async move {
+            while let Some(step) = progress_step_rx.recv().await {
+                step_pb_clone.set_message(step);
+            }
+        });
+
+        (Some(pb), Some(step_pb), Some(step_task), Some(progress_step_tx))
     };
 
-    client
-        .build_image(&dockerfile, &context, &image_tag, &args, no_cache, verbose)
-        .await?;
+    let build_result = client
+        .build_image(
+            &dockerfile,
+            &context,
+            &build_image_tag,
+            &args,
+            no_cache,
+            verbose,
+            progress_step_tx,
+        )
+        .await;
 
+    if let Some(step_task) = step_task {
+        let _ = step_task.await;
+    }
+
+    if let Some(step_pb) = step_pb {
+        step_pb.finish_and_clear();
+    }
     if let Some(pb) = pb {
         pb.finish_and_clear();
     }
+
+    build_result?;
     println!(
         "{} Successfully built image: {}",
         "✓".green().bold(),
-        image_tag.cyan()
+        build_image_tag.cyan()
     );
 
     // --- Update state with new hashes after successful build ---
@@ -535,7 +582,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         dockerfile_hash,
         command_hash,
         pushed_build_hash,
-        image_tag: Some(image_tag),
+        image_tag,
         script: prev_state.as_ref().and_then(|s| s.script.clone()),
         plugins_arcgis: prev_state.as_ref().and_then(|s| s.plugins_arcgis),
         plugins_qgis: prev_state.as_ref().and_then(|s| s.plugins_qgis),
@@ -982,6 +1029,7 @@ pub async fn run_worker(
         }
         inputs.insert(parts[0].to_string(), parts[1].to_string());
     }
+    let mut client: Option<DockerClient> = None;
 
     // Build extra mounts from input values that are explicitly defined as
     // file/folder inputs in worker config.
@@ -1038,6 +1086,10 @@ pub async fn run_worker(
                                 value
                             ),
                             false => {
+                                // Ensure Docker is reachable before mutating host paths.
+                                if client.is_none() {
+                                    client = Some(DockerClient::new().await?);
+                                }
                                 if let Some(parent) = path.parent() {
                                     if !parent.as_os_str().is_empty() {
                                         fs::create_dir_all(parent)?;
@@ -1158,7 +1210,13 @@ pub async fn run_worker(
                                 key,
                                 value
                             ),
-                            false => std::fs::create_dir_all(path)?,
+                            false => {
+                                // Ensure Docker is reachable before mutating host paths.
+                                if client.is_none() {
+                                    client = Some(DockerClient::new().await?);
+                                }
+                                std::fs::create_dir_all(path)?
+                            },
                         };
                     } else if !path.is_dir() {
                         anyhow::bail!(
@@ -1293,7 +1351,10 @@ pub async fn run_worker(
     }
 
     // Run the container
-    let client = DockerClient::new().await?;
+    if client.is_none() {
+        client = Some(DockerClient::new().await?);
+    }
+    let client = client.as_ref().expect("Docker client must be initialized");
     let exit_code = if json_output {
         client.run_container_attached_to_stderr(&container_config).await?
     } else {
@@ -1365,9 +1426,13 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
         })
         .unwrap_or_default();
 
-    let version_built = get_latest_worker_version_clientless(&config.name).await;
-
     let worker_state = state::load_state(&worker_name).ok().flatten();
+    let version_built = worker_state
+        .as_ref()
+        .and_then(|s| s.image_tag.as_deref())
+        .map(|tag| tag.rsplit_once('/').map_or(tag, |(_, tail)| tail))
+        .map(|tail| tail.rsplit_once(':').map_or(tail, |(_, version)| version))
+        .map(|version| version.strip_prefix('v').unwrap_or(version).to_string());
     let applied_at = worker_state.as_ref().map(|s| s.applied_at.clone());
     let built_at = worker_state.as_ref().and_then(|s| s.built_at.clone());
     let yaml_hash = worker_state.as_ref().and_then(|s| s.yaml_hash.as_ref().map(|h| short_hash(h)));
@@ -1410,7 +1475,7 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
                             );
                             println!("{}{}",
                                      " ".repeat(15),
-                                     "Run `geoengine build` to build image.".italic().yellow()
+                                     "Run `geoengine build` to build pushable image.".italic().yellow()
                             );
                         },
                         Err(e) => {

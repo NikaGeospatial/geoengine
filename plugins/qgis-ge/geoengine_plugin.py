@@ -6,10 +6,10 @@ GeoEngine QGIS Plugin - Main plugin class
 import os
 import shutil
 
+import qgis.gui
 from qgis.core import QgsApplication
 from qgis.PyQt.QtCore import QFileSystemWatcher
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
-from qgis.PyQt.QtGui import QIcon
 
 from .geoengine_provider import (
     GeoEngineProvider,
@@ -41,6 +41,8 @@ class GeoEnginePlugin:
         self.actions = []
         self.menu = '&GeoEngine'
         self._watcher = None
+        self._geoengine_param_types = []
+        self._geoengine_widget_factories = []
 
     def initProcessing(self):
         """Initialize the processing provider."""
@@ -94,6 +96,9 @@ class GeoEnginePlugin:
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
         # Initialize processing provider
         self.initProcessing()
+
+        self._register_custom_widgets()
+
         self._refresh_geoengine_provider()
         self._refresh_processing_toolbox_providers()
 
@@ -149,6 +154,8 @@ class GeoEnginePlugin:
         for action in self.actions:
             self.iface.removePluginMenu(self.menu, action)
 
+        self._deregister_custom_widgets()
+
         # Remove provider
         if self.provider:
             QgsApplication.processingRegistry().removeProvider(self.provider)
@@ -197,3 +204,37 @@ class GeoEnginePlugin:
         set_dev_mode_enabled(bool(enabled))
         mode = "enabled" if enabled else "disabled"
         self.iface.messageBar().pushInfo("GeoEngine", f"Dev mode {mode}")
+
+    def _register_custom_widgets(self):
+        """Register custom widgets from geoengine_widgets.py. Add custom widgets here for registration."""
+        from .geoengine_widgets import (
+            QgsProcessingParameterLayerOrFileType,
+            QgsLayerOrFileParameterWidgetFactory,
+        )
+
+        # ------------------------------------------------------------------------------------
+        # Add widget types and factories here
+        param_types = [
+            QgsProcessingParameterLayerOrFileType(),
+        ]
+        widget_factories = [
+            QgsLayerOrFileParameterWidgetFactory(),
+        ]
+        # ------------------------------------------------------------------------------------
+
+        for param_type in param_types:
+            QgsApplication.processingRegistry().addParameterType(param_type)
+        self._geoengine_param_types = param_types
+
+        for widget_factory in widget_factories:
+            qgis.gui.QgsGui.processingGuiRegistry().addParameterWidgetFactory(widget_factory)
+        self._geoengine_widget_factories = widget_factories
+
+    def _deregister_custom_widgets(self):
+        for param_type in self._geoengine_param_types:
+            QgsApplication.processingRegistry().removeParameterType(param_type)
+        self._geoengine_param_types.clear()
+
+        for widget_factory in self._geoengine_widget_factories:
+            qgis.gui.QgsGui.processingGuiRegistry().removeParameterWidgetFactory(widget_factory)
+        self._geoengine_widget_factories.clear()
