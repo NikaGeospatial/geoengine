@@ -347,12 +347,28 @@ pub async fn build_worker_local(no_cache: bool, dev: bool, build_args: &[String]
     build_worker(&worker_name, no_cache, dev, build_args, verbose).await
 }
 
+async fn local_image_exists(client: &DockerClient, image_name: &str) -> Result<bool> {
+    let images = client
+        .list_images(Some(image_name), true)
+        .await
+        .with_context(|| format!("Failed to verify local image '{}'", image_name))?;
+
+    Ok(images
+        .into_iter()
+        .any(|image| image.repo_tags.into_iter().any(|tag| tag == image_name)))
+}
+
 pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &[String], verbose: bool) -> Result<()> {
     let settings = Settings::load()?;
     let worker_path = settings.get_worker_path(worker)?;
     let config = yaml_store::load_saved_config(worker)?;
 
     let new_version = config.version.clone();
+    let build_image_tag = if dev {
+        format!("geoengine-local-dev/{}:latest", config.name)
+    } else {
+        format!("geoengine-local/{}:{}", config.name, new_version)
+    };
 
     // --- File change detection ---
     let dockerfile = worker_path.join("Dockerfile");
@@ -394,12 +410,36 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
     };
 
     if !no_cache && !files_changed {
-        println!(
-            "{} No build-related changes detected for worker '{}'. Nothing to build.",
-            "✓".green().bold(),
-            worker.cyan()
-        );
-        return Ok(());
+        match DockerClient::new().await {
+            Ok(client) => match local_image_exists(&client, &build_image_tag).await {
+                Ok(true) => {
+                    println!(
+                        "{} No build-related changes detected for worker '{}'. Nothing to build.",
+                        "✓".green().bold(),
+                        worker.cyan()
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {
+                    println!(
+                        "{} Cached image '{}' was not found locally. Rebuilding.",
+                        "!".yellow().bold(),
+                        build_image_tag.as_str().cyan()
+                    );
+                }
+                Err(e) => {
+                    println!("{} {}. Rebuilding.", "!".yellow().bold(), e);
+                }
+            },
+            Err(e) => {
+                println!(
+                    "{} Could not verify cached image '{}': {}. Attempting rebuild.",
+                    "!".yellow().bold(),
+                    build_image_tag.as_str().cyan(),
+                    e
+                );
+            }
+        }
     }
 
     // --- Version validation (Docker-backed) ---
@@ -454,16 +494,10 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
     );
 
     let context = worker_path.clone();
-    let (image_tag, build_image_tag) = if dev {
-        (
-            prev_state.as_ref().and_then(|s| s.image_tag.clone()),
-            format!("geoengine-local-dev/{}:latest", config.name)
-        )
+    let image_tag = if dev {
+        prev_state.as_ref().and_then(|s| s.image_tag.clone())
     } else {
-        (
-            Some(format!("geoengine-local/{}:{}", config.name, new_version)),
-            format!("geoengine-local/{}:{}", config.name, new_version)
-        )
+        Some(build_image_tag.clone())
     };
 
     // Parse build args from CLI only

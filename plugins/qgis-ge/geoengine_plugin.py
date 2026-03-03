@@ -156,6 +156,8 @@ class GeoEnginePlugin:
         for action in self.actions:
             self.iface.removePluginMenu(self.menu, action)
 
+        self._deregister_custom_widgets()
+
         # Remove provider
         if self.provider:
             QgsApplication.processingRegistry().removeProvider(self.provider)

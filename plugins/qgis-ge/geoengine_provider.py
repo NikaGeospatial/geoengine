@@ -847,8 +847,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         if layer is not None:
             source = None
             if isinstance(layer, str):
-                if os.path.isfile(layer):
-                    source = layer
+                source = layer
             else:
                 try:
                     source = layer.source()
@@ -859,21 +858,22 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                         source = layer.dataProvider().dataSourceUri()
                     except Exception:
                         source = None
-                source_text = str(source or "")
-                # Provider URIs with sublayer selectors (e.g. GeoPackage layername)
-                # should preserve the selected layer, so export instead of stripping.
-                if "|" in source_text:
-                    normalized = None
-                else:
-                    normalized = self._normalize_local_file_path(source_text)
-                # Only use the file path directly when it already has an extension that
-                # the worker accepts (or when no filetypes restriction is declared).
-                # A no-extension path (QGIS scratch layer) must be exported so the CLI
-                # receives a properly named file in the expected format.
-                if normalized:
-                    ext = os.path.splitext(normalized)[1].lower()
-                    if ext and (not accepted or ext in accepted):
-                        return {"path": normalized, "temp_dir": None, "exported_temp": False}
+            source_text = str(source or "")
+            # Provider URIs with sublayer selectors (e.g. GeoPackage layername)
+            # should preserve the selected layer, so export instead of stripping.
+            if "|" in source_text and not isinstance(layer, str):
+                normalized = None
+            else:
+                normalized = self._normalize_local_file_path(source_text)
+            # Only use the file path directly when it already has an extension that
+            # the worker accepts (or when no filetypes restriction is declared).
+            # A no-extension path (QGIS scratch layer) must be exported so the CLI
+            # receives a properly named file in the expected format.
+            if normalized:
+                ext = os.path.splitext(normalized)[1].lower()
+                if ext and (not accepted or ext in accepted):
+                    return {"path": normalized, "temp_dir": None, "exported_temp": False}
+            if not isinstance(layer, str):
                 exported = self._export_layer_to_temp_if_needed(
                     layer, name, context, feedback, vector_suffix=preferred_vector_suffix
                 )

@@ -485,9 +485,20 @@ impl DockerClient {
         let container_id = self.create_container(config).await?;
 
         // Start the container
-        self.docker
+        if let Err(start_err) = self
+            .docker
             .start_container(&container_id, None::<StartContainerOptions<String>>)
-            .await?;
+            .await
+        {
+            if let Err(remove_err) = self.remove_container(&container_id, true).await {
+                tracing::warn!(
+                    "Failed to remove container {} after start failure: {}",
+                    container_id,
+                    remove_err
+                );
+            }
+            return Err(start_err.into());
+        }
 
         if !logs_to_stderr {
             let command_display = config
@@ -671,9 +682,20 @@ impl DockerClient {
     pub async fn run_container_detached(&self, config: &ContainerConfig) -> Result<String> {
         let container_id = self.create_container(config).await?;
 
-        self.docker
+        if let Err(start_err) = self
+            .docker
             .start_container(&container_id, None::<StartContainerOptions<String>>)
-            .await?;
+            .await
+        {
+            if let Err(remove_err) = self.remove_container(&container_id, true).await {
+                tracing::warn!(
+                    "Failed to remove container {} after start failure: {}",
+                    container_id,
+                    remove_err
+                );
+            }
+            return Err(start_err.into());
+        }
 
         Ok(container_id)
     }

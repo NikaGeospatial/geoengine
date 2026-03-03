@@ -715,20 +715,44 @@ fn v2_remove_state_image_tag_no_dev<'a>(
     Box::pin(async move{
         let image_tag = worker_state.image_tag.as_ref();
         if image_tag.is_some_and(|t| t.as_str().contains("dev")) {
-            let docker = DockerClient::new().await?;
-            let latest_built_ver = get_latest_worker_version(
-                worker_state.worker_name.as_ref(),
-                &docker,
-            ).await;
+            let mut updated_image_tag = false;
+            match DockerClient::new().await {
+                Ok(docker) => {
+                    let latest_built_ver = get_latest_worker_version(
+                        worker_state.worker_name.as_ref(),
+                        &docker,
+                    )
+                    .await;
 
-            worker_state.image_tag = latest_built_ver.map(|v| v.to_string());
+                    if let Some(version) = latest_built_ver {
+                        worker_state.image_tag = Some(version);
+                        updated_image_tag = true;
+                    } else {
+                        let msg = format!(
+                            "Could not determine latest built image for '{}' while patching state/{}.yaml; keeping existing image tag.",
+                            worker_state.worker_name, stem
+                        );
+                        println!("  {} {}", "!".yellow().bold(), msg);
+                    }
+                }
+                Err(e) => {
+                    let msg = format!(
+                        "Could not connect to Docker while patching state/{}.yaml: {}. Keeping existing image tag.",
+                        stem, e
+                    );
+                    println!("  {} {}", "!".yellow().bold(), msg);
+                }
+            }
+
             state::save_state(worker_state)?;
 
-            let msg = format!(
-                "Made image tag not reflect dev images from state/{}.yaml",
-                stem
-            );
-            println!("  {} {}", "!".yellow().bold(), msg);
+            if updated_image_tag {
+                let msg = format!(
+                    "Made image tag not reflect dev images from state/{}.yaml",
+                    stem
+                );
+                println!("  {} {}", "!".yellow().bold(), msg);
+            }
         }
         Ok(V2StateFlow::Continue)
     })
