@@ -102,6 +102,10 @@ impl EnvCommands {
 /// If file is specified, read from file and set environment variables from it.
 /// If both file and key-value pairs are specified, key-value pairs take precedence.
 async fn set_env_vars(vars: Vec<(String, String)>, file: Option<String>) -> Result<()> {
+    if vars.is_empty() && file.is_none() {
+        anyhow::bail!("No variables provided. Pass KEY=VALUE and/or -f <path>.");
+    }
+
     let mut settings = Settings::load()?;
     if file.is_some() {
         let path = PathBuf::from(file.as_deref().unwrap());

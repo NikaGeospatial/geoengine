@@ -215,8 +215,9 @@ geoengine image import my-image.tar --tag my-image:latest
 geoengine image remove my-image:latest
 ```
 
-### Environment Variables
+### Global Environment Variables
 
+These environment variables are injected into all workers.
 ```bash
 # Add a global GeoEngine environment variable
 geoengine env set VARIABLE=value

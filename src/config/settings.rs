@@ -113,18 +113,8 @@ impl Settings {
 
     /// Set an environment variable
     pub fn set_env(&mut self, key: &str, value: &str) -> Result<()> {
-        // Create the env map if it doesn't exist
-        // If exists, remove the key first
-        if self.env.is_none() {
-            self.env = Some(HashMap::new());
-        } else {
-            let find = self.env.as_mut().unwrap().get(key);
-            if find.is_some() {
-                self.remove_env(key)?;
-            }
-        }
-        // Add the new key-value pair
-        self.env.as_mut().unwrap().insert(key.to_string(), value.to_string());
+        let env = self.env.get_or_insert_with(HashMap::new);
+        env.insert(key.to_string(), value.to_string());
         Ok(())
     }
 
