@@ -1013,7 +1013,6 @@ pub async fn run_worker(
     // Update if version changed
     let this_ver = config.version;
 
-
     // Get command config
     let cmd_config = config
         .command
@@ -1030,6 +1029,9 @@ pub async fn run_worker(
         inputs.insert(parts[0].to_string(), parts[1].to_string());
     }
     let mut client: Option<DockerClient> = None;
+
+    // Get global GeoEngine settings
+    let settings = Settings::load()?;
 
     // Build extra mounts from input values that are explicitly defined as
     // file/folder inputs in worker config.
@@ -1330,7 +1332,10 @@ pub async fn run_worker(
     let container_config = ContainerConfig {
         image: image_tag,
         command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), full_command]),
-        env_vars: HashMap::new(),
+        env_vars: match settings.env {
+            None => HashMap::new(),
+            Some(env) => env.clone(),
+        },
         mounts,
         gpu_config,
         workdir: None,

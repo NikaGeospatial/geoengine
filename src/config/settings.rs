@@ -18,6 +18,8 @@ pub struct Settings {
     /// Default GCP region
     pub gcp_region: Option<String>,
 
+    /// Global environment variables
+    pub env: Option<HashMap<String, String>>,
 }
 
 impl Settings {
@@ -107,5 +109,45 @@ impl Settings {
             .iter()
             .map(|(k, v)| (k.as_str(), v))
             .collect()
+    }
+
+    /// Set an environment variable
+    pub fn set_env(&mut self, key: &str, value: &str) -> Result<()> {
+        // Create the env map if it doesn't exist
+        // If exists, remove the key first
+        if self.env.is_none() {
+            self.env = Some(HashMap::new());
+        } else {
+            let find = self.env.as_mut().unwrap().get(key);
+            if find.is_some() {
+                self.remove_env(key)?;
+            }
+        }
+        // Add the new key-value pair
+        self.env.as_mut().unwrap().insert(key.to_string(), value.to_string());
+        Ok(())
+    }
+
+    /// Remove an environment variable
+    pub fn remove_env(&mut self, key: &str) -> Result<()> {
+        // Bail if the key doesn't exist
+        if self.env.is_none() || self.env.as_ref().unwrap().get(key).is_none() {
+            return Err(anyhow::anyhow!("Environment variable '{}' not found", key));
+        }
+        self.env.as_mut().unwrap().remove(key);
+        if self.env.as_ref().unwrap().is_empty() {
+            self.env = None;
+        }
+        Ok(())
+    }
+
+    /// List all environment variables
+    pub fn list_env(&self) -> Option<HashMap<String, String>> {
+        self.env.clone()
+    }
+
+    /// Get the value of an environment variable
+    pub fn get_env(&self, key: &str) -> Option<&str> {
+        self.env.as_ref().and_then(|env| env.get(key).map(|v| v.as_str()))
     }
 }
