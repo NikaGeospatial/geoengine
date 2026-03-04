@@ -125,6 +125,10 @@ async fn set_env_vars(vars: Vec<(String, String)>, file: Option<String>) -> Resu
 
 /// Unset environment variables from vector of keys
 async fn unset_env_var(keys: Vec<String>) -> Result<()> {
+    if keys.is_empty() {
+        anyhow::bail!("No variable names provided. Pass one or more keys.");
+    }
+
     let mut settings = Settings::load()?;
     for key in keys {
         match settings.remove_env(key.as_ref()) {
@@ -137,6 +141,7 @@ async fn unset_env_var(keys: Vec<String>) -> Result<()> {
     }
     settings.save()?;
     Ok(())
+}
 }
 
 async fn list_env_vars() -> Result<()> {
