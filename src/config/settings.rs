@@ -113,6 +113,10 @@ impl Settings {
 
     /// Set an environment variable
     pub fn set_env(&mut self, key: &str, value: &str) -> Result<()> {
+        if key.trim().is_empty() {
+            anyhow::bail!("Environment variable key cannot be empty");
+        }
+
         let env = self.env.get_or_insert_with(HashMap::new);
         env.insert(key.to_string(), value.to_string());
         Ok(())
