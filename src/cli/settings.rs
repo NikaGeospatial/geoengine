@@ -142,7 +142,6 @@ async fn unset_env_var(keys: Vec<String>) -> Result<()> {
     settings.save()?;
     Ok(())
 }
-}
 
 async fn list_env_vars() -> Result<()> {
     let settings = Settings::load()?;
