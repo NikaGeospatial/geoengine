@@ -3,6 +3,7 @@ pub mod image;
 pub mod patch;
 pub mod plugins;
 pub mod worker;
+pub mod settings;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -132,6 +133,12 @@ enum Commands {
 
     /// Validate and patch all GeoEngine artifacts and registered workers
     Patch,
+    
+    /// Manage global environment variables across all workers
+    Env {
+        #[command(subcommand)]
+        command: settings::EnvCommands,
+    }
 }
 
 impl Cli {
@@ -170,6 +177,7 @@ impl Cli {
             Commands::Diff { file } => worker::diff_worker(file.as_deref()).await,
             Commands::Deploy { command } => command.execute().await,
             Commands::Patch => patch::patch_all_v2().await,
+            Commands::Env { command } => command.execute().await,
         }
     }
 }

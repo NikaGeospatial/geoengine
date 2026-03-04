@@ -215,18 +215,33 @@ geoengine image import my-image.tar --tag my-image:latest
 geoengine image remove my-image:latest
 ```
 
-### Deploy to Cloud
+### Global Environment Variables
 
+These environment variables are injected into all workers.
 ```bash
-# Configure GCP authentication
-geoengine deploy auth --project my-gcp-project
+# Add a global GeoEngine environment variable
+geoengine env set VARIABLE=value
+geoengine env set VARIABLE="val ue"
+geoengine env set VAR1=val1 VAR2=val2 ...
 
-# Push image to Artifact Registry
-geoengine deploy push my-image:latest \
-  --project my-gcp-project \
-  --region us-central1 \
-  --repository geoengine
+# Set a list of GeoEngine environment variables from a file
+geoengine env set -f path/to/.env
+
+# Delete a global GeoEngine environment variable
+geoengine env unset VARIABLE
+geoengine env unset VAR1 VAR2 ...
+
+# List all global environment variables
+geoengine env list
+
+# Show the value of a global environment variable
+geoengine env show VARIABLE
 ```
+
+If you choose to set variables from a file, make sure it follows the [`.env` format](https://hexdocs.pm/dotenvy/dotenv-file-format.html).
+
+If you do `geoengine env set VAR1=val1 VAR2=val2 -f path/to/.env`, inline variable settings will override those in the path.
+e.g. if `VAR1` is set in the file as well, the final value will be `val1`.
 
 ### Example Workers
 
