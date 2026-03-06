@@ -12,8 +12,8 @@ from qgis.PyQt.QtWidgets import (
 
 class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
 
-    def __init__(self, parameter, dialog=None, row=0, col=0, **kwargs):
-        super().__init__(parameter, QgsProcessingGui.Standard)
+    def __init__(self, parameter, dialog_type=QgsProcessingGui.Standard, row=0, col=0, **kwargs):
+        super().__init__(parameter, dialog_type)
 
     def createWidget(self):
         # Outer container

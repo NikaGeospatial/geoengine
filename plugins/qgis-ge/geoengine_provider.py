@@ -1024,7 +1024,9 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             # source path rather than its layer ID).
             for lyr in QgsProject.instance().mapLayers().values():
                 try:
-                    if lyr.source() == value:
+                    lyr_source = self._strip_qgis_source_uri_suffix(lyr.source())
+                    value_stripped = self._strip_qgis_source_uri_suffix(value)
+                    if lyr_source == value_stripped:
                         return lyr
                 except Exception:
                     pass
