@@ -1,6 +1,6 @@
 import traceback
 
-from qgis.core import QgsMessageLog
+from qgis.core import QgsMessageLog, QgsProcessingParameterDefinition
 from qgis.gui import (
     QgsAbstractProcessingParameterWidgetWrapper,
     QgsProcessingGui,
@@ -40,7 +40,10 @@ class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
 
         # Left: map layer combo box
         self._combo = QgsMapLayerComboBox()
-        self._combo.setAllowEmptyLayer(False)
+        is_optional = bool(
+            self.parameterDefinition().flags() & QgsProcessingParameterDefinition.FlagOptional
+        )
+        self._combo.setAllowEmptyLayer(is_optional)
         self._combo.layerChanged.connect(self._on_layer_changed)
         layout.addWidget(self._combo, stretch=1, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -57,8 +60,8 @@ class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
         self._use_file = False
 
         # Build the file-dialog filter from the filetypes declared in metadata.
-        # e.g. ['.txt', '.csv'] → "Accepted files (*.txt *.csv);;All Files (*.*)"
-        # An empty list means no restriction → "All Files (*.*)"
+        # e.g. ['.txt', '.csv'] → "Accepted files (*.txt *.csv);;All Files (*)"
+        # An empty list means no restriction → "All Files (*)"
         filetypes = []
         try:
             meta = self.parameterDefinition().metadata()
@@ -72,9 +75,9 @@ class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
             )
         if filetypes:
             pattern = " ".join(f"*{ft}" for ft in filetypes)
-            self._file_filter = f"Accepted files ({pattern});;All Files (*.*)"
+            self._file_filter = f"Accepted files ({pattern});;All Files (*)"
         else:
-            self._file_filter = "All Files (*.*)"
+            self._file_filter = "All Files (*)"
 
         return self._widget
 

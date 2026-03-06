@@ -507,6 +507,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 param = QgsProcessingParameterString(
                     name,
                     label,
+                    defaultValue=default,
                     optional=not required,
                 )
                 param.setMetadata({
@@ -518,16 +519,18 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             else:
                 param = QgsProcessingParameterFileDestination(
                     name, label,
-                    fileFilter=file_filter if file_filter else "All files (*.*)",
+                    fileFilter=file_filter if file_filter else "All files (*)",
+                    defaultValue=default,
                     optional=not required,
                 )
         elif param_type == 'folder':
             if readonly:
                 param = QgsProcessingParameterFile(
-                    name, label, behavior=QgsProcessingParameterFile.Folder, optional=not required
+                    name, label, behavior=QgsProcessingParameterFile.Folder,
+                    defaultValue=default, optional=not required,
                 )
             else:
-                param = QgsProcessingParameterFolderDestination(name, label, optional=not required)
+                param = QgsProcessingParameterFolderDestination(name, label, defaultValue=default, optional=not required)
         elif param_type == 'datetime':
             param = QgsProcessingParameterString(name, label, defaultValue=default, optional=not required)
         elif param_type == 'string':
@@ -1010,25 +1013,19 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         if value is None:
             return None
         if isinstance(value, str):
-            # If the string is an existing file path, return it directly.
-            # Calling parameterAsLayer on a plain file (e.g. .txt, .csv) can
-            # cause QGIS to load it as a delimited-text layer whose .source()
-            # returns a mangled URI with query parameters rather than the clean
-            # path the worker expects.
-            stripped = self._strip_qgis_source_uri_suffix(value)
-            if os.path.isfile(stripped):
-                return value
-            # Not a file path — check if it's a project layer ID or source URI.
+            # Try to resolve the value as a project layer first, so
+            # file-backed layers are returned as layer objects (enabling
+            # downstream export logic) rather than plain file paths.
             layer = QgsProject.instance().mapLayer(value)
             if layer is not None:
                 return layer
             # Search by source URI (e.g. the combo box may store the layer's
             # source path rather than its layer ID).
+            stripped = self._strip_qgis_source_uri_suffix(value)
             for lyr in QgsProject.instance().mapLayers().values():
                 try:
                     lyr_source = self._strip_qgis_source_uri_suffix(lyr.source())
-                    value_stripped = self._strip_qgis_source_uri_suffix(value)
-                    if lyr_source == value_stripped:
+                    if lyr_source == stripped:
                         return lyr
                 except Exception as e:
                     QgsMessageLog.logMessage(
@@ -1037,6 +1034,14 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                         "GeoEngine",
                         0,
                     )
+            # No matching project layer — if the string is an existing file
+            # path, return it directly.  This avoids calling parameterAsLayer
+            # on a plain file (e.g. .txt, .csv) which can cause QGIS to load
+            # it as a delimited-text layer whose .source() returns a mangled
+            # URI with query parameters rather than the clean path the worker
+            # expects.
+            if os.path.isfile(stripped):
+                return value
         # For non-string values (e.g. QgsMapLayer objects passed directly),
         # return as-is.
         if hasattr(value, 'source'):
