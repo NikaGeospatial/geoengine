@@ -29,6 +29,13 @@ def _strip_qgis_source_uri_suffix(source: str) -> str:
 class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
 
     def __init__(self, parameter, dialog_type=QgsProcessingGui.Standard, row=0, col=0, **kwargs):
+        # The old-style wrapper factory (wrappers.py) passes the AlgorithmDialog
+        # object as the second argument instead of a QgsProcessingGui.DialogType
+        # integer.  Detect that case and extract the correct enum value so the
+        # C++ base-class constructor receives the type it expects.
+        if not isinstance(dialog_type, int):
+            dialog_type = getattr(dialog_type, 'dialog_type',
+                                  QgsProcessingGui.Standard)
         super().__init__(parameter, dialog_type)
 
     def createWidget(self):
