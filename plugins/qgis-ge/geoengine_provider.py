@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import traceback
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from qgis.PyQt.QtCore import QUrl
@@ -27,6 +28,7 @@ from qgis.core import (
     QgsProcessingParameterFolderDestination,
     QgsProcessingParameterEnum,
     QgsProcessingProvider,
+    QgsMessageLog,
     QgsProject,
     QgsRasterFileWriter,
     QgsRasterLayer,
@@ -1028,8 +1030,13 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                     value_stripped = self._strip_qgis_source_uri_suffix(value)
                     if lyr_source == value_stripped:
                         return lyr
-                except Exception:
-                    pass
+                except Exception as e:
+                    QgsMessageLog.logMessage(
+                        f"GeoEngine: skipping layer '{lyr.id()}' ({lyr.name()}) during source URI"
+                        f" lookup: {e}\n{traceback.format_exc()}",
+                        "GeoEngine",
+                        0,
+                    )
         # For non-string values (e.g. QgsMapLayer objects passed directly),
         # return as-is.
         if hasattr(value, 'source'):

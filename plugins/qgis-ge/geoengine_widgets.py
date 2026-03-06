@@ -1,13 +1,29 @@
+import traceback
+
+from qgis.core import QgsMessageLog
 from qgis.gui import (
     QgsAbstractProcessingParameterWidgetWrapper,
     QgsProcessingGui,
     QgsMapLayerComboBox,
     QgsProcessingParameterWidgetFactoryInterface
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QUrl
 from qgis.PyQt.QtWidgets import (
     QWidget, QHBoxLayout, QPushButton, QFileDialog
 )
+
+
+def _strip_qgis_source_uri_suffix(source: str) -> str:
+    """Strip QGIS provider URI suffixes like '|layername=foo' from local file sources."""
+    if not source:
+        return source
+    if source.startswith("file://"):
+        local = QUrl(source).toLocalFile()
+        if local:
+            source = local
+    if '|' in source:
+        source = source.split('|', 1)[0]
+    return source
 
 
 class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
@@ -47,8 +63,13 @@ class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
         try:
             meta = self.parameterDefinition().metadata()
             filetypes = meta.get('widget_wrapper', {}).get('filetypes', []) or []
-        except Exception:
-            pass
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"GeoEngine: could not read filetypes from parameterDefinition().metadata(),"
+                f" falling back to accept all files: {e}\n{traceback.format_exc()}",
+                "GeoEngine",
+                0,
+            )
         if filetypes:
             pattern = " ".join(f"*{ft}" for ft in filetypes)
             self._file_filter = f"Accepted files ({pattern});;All Files (*.*)"
@@ -109,7 +130,7 @@ class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
             return self._file_path
         layer = self._combo.currentLayer()
         if layer:
-            return layer.source()
+            return _strip_qgis_source_uri_suffix(layer.source())
         return ""
 
     def postInitialize(self, wrappers):
