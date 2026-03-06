@@ -208,17 +208,16 @@ class GeoEnginePlugin:
     def _register_custom_widgets(self):
         """Register custom widgets from geoengine_widgets.py. Add custom widgets here for registration."""
         from .geoengine_widgets import (
-            QgsProcessingParameterLayerOrFileType,
-            QgsLayerOrFileParameterWidgetFactory,
+            MapLayerWithFileFactory,
         )
 
         # ------------------------------------------------------------------------------------
         # Add widget types and factories here
         param_types = [
-            QgsProcessingParameterLayerOrFileType(),
+
         ]
         widget_factories = [
-            QgsLayerOrFileParameterWidgetFactory(),
+            MapLayerWithFileFactory(),
         ]
         # ------------------------------------------------------------------------------------
 

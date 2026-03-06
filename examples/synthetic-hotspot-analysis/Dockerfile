@@ -20,7 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	git \
 	&& rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /usr/local/bin/pixi /usr/local/bin/pixi
 COPY --from=build /pixi/.pixi/envs/default /pixi/.pixi/envs/default
 COPY --from=build --chmod=0755 /pixi/entrypoint.sh /pixi/entrypoint.sh
 COPY --from=build /pixi/pixi.toml /pixi/pixi.toml

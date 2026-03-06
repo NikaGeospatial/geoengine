@@ -36,7 +36,7 @@ from qgis.core import (
     QgsVectorFileWriter,
 )
 from .geoengine_widgets import (
-    QgsProcessingParameterLayerOrFile
+    MapLayerWithFileWrapper
 )
 
 
@@ -498,14 +498,21 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         if param_type == 'file':
             if readonly:
                 # Read-only file inputs may be geospatial layers or plain files
-                # (e.g. .txt, .csv). Use the custom LayerOrFile widget so users
-                # can pick either a loaded layer or any accepted file path.
-                param = QgsProcessingParameterLayerOrFile(
+                # (e.g. .txt, .csv). Use a string parameter so QGIS does not
+                # validate the value as a map layer — our custom widget returns
+                # either a layer source URI or a plain file path, both of which
+                # are valid strings.
+                param = QgsProcessingParameterString(
                     name,
                     label,
                     optional=not required,
-                    filetypes=filetypes,
                 )
+                param.setMetadata({
+                    'widget_wrapper': {
+                        'class': MapLayerWithFileWrapper,
+                        'filetypes': filetypes,  # e.g. ['.txt', '.csv'] or [] for all
+                    }
+                })
             else:
                 param = QgsProcessingParameterFileDestination(
                     name, label,
@@ -1000,16 +1007,31 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         value = parameters.get(name)
         if value is None:
             return None
-        # Layer widgets may serialize their selection as a layer-id string.
-        # Resolve known project layer ids before treating a string as a path.
         if isinstance(value, str):
+            # If the string is an existing file path, return it directly.
+            # Calling parameterAsLayer on a plain file (e.g. .txt, .csv) can
+            # cause QGIS to load it as a delimited-text layer whose .source()
+            # returns a mangled URI with query parameters rather than the clean
+            # path the worker expects.
+            stripped = self._strip_qgis_source_uri_suffix(value)
+            if os.path.isfile(stripped):
+                return value
+            # Not a file path — check if it's a project layer ID or source URI.
             layer = QgsProject.instance().mapLayer(value)
             if layer is not None:
                 return layer
-
-        layer = self.parameterAsLayer(parameters, name, context)
-        if layer is not None:
-            return layer
+            # Search by source URI (e.g. the combo box may store the layer's
+            # source path rather than its layer ID).
+            for lyr in QgsProject.instance().mapLayers().values():
+                try:
+                    if lyr.source() == value:
+                        return lyr
+                except Exception:
+                    pass
+        # For non-string values (e.g. QgsMapLayer objects passed directly),
+        # return as-is.
+        if hasattr(value, 'source'):
+            return value
         return value
 
     def processAlgorithm(
