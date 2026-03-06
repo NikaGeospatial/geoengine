@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import traceback
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from qgis.PyQt.QtCore import QUrl
@@ -27,6 +28,7 @@ from qgis.core import (
     QgsProcessingParameterFolderDestination,
     QgsProcessingParameterEnum,
     QgsProcessingProvider,
+    QgsMessageLog,
     QgsProject,
     QgsRasterFileWriter,
     QgsRasterLayer,
@@ -36,7 +38,7 @@ from qgis.core import (
     QgsVectorFileWriter,
 )
 from .geoengine_widgets import (
-    QgsProcessingParameterLayerOrFile
+    MapLayerWithFileWrapper
 )
 
 
@@ -498,27 +500,37 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         if param_type == 'file':
             if readonly:
                 # Read-only file inputs may be geospatial layers or plain files
-                # (e.g. .txt, .csv). Use the custom LayerOrFile widget so users
-                # can pick either a loaded layer or any accepted file path.
-                param = QgsProcessingParameterLayerOrFile(
+                # (e.g. .txt, .csv). Use a string parameter so QGIS does not
+                # validate the value as a map layer — our custom widget returns
+                # either a layer source URI or a plain file path, both of which
+                # are valid strings.
+                param = QgsProcessingParameterString(
                     name,
                     label,
+                    defaultValue=default,
                     optional=not required,
-                    filetypes=filetypes,
                 )
+                param.setMetadata({
+                    'widget_wrapper': {
+                        'class': MapLayerWithFileWrapper,
+                        'filetypes': filetypes,  # e.g. ['.txt', '.csv'] or [] for all
+                    }
+                })
             else:
                 param = QgsProcessingParameterFileDestination(
                     name, label,
-                    fileFilter=file_filter if file_filter else "All files (*.*)",
+                    fileFilter=file_filter if file_filter else "All files (*)",
+                    defaultValue=default,
                     optional=not required,
                 )
         elif param_type == 'folder':
             if readonly:
                 param = QgsProcessingParameterFile(
-                    name, label, behavior=QgsProcessingParameterFile.Folder, optional=not required
+                    name, label, behavior=QgsProcessingParameterFile.Folder,
+                    defaultValue=default, optional=not required,
                 )
             else:
-                param = QgsProcessingParameterFolderDestination(name, label, optional=not required)
+                param = QgsProcessingParameterFolderDestination(name, label, defaultValue=default, optional=not required)
         elif param_type == 'datetime':
             param = QgsProcessingParameterString(name, label, defaultValue=default, optional=not required)
         elif param_type == 'string':
@@ -1000,16 +1012,46 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         value = parameters.get(name)
         if value is None:
             return None
-        # Layer widgets may serialize their selection as a layer-id string.
-        # Resolve known project layer ids before treating a string as a path.
         if isinstance(value, str):
+            # Try to resolve the value as a project layer first, so
+            # file-backed layers are returned as layer objects (enabling
+            # downstream export logic) rather than plain file paths.
             layer = QgsProject.instance().mapLayer(value)
             if layer is not None:
                 return layer
-
-        layer = self.parameterAsLayer(parameters, name, context)
-        if layer is not None:
-            return layer
+            # Search by source URI (e.g. the combo box may store the layer's
+            # source path rather than its layer ID).
+            stripped = self._strip_qgis_source_uri_suffix(value)
+            stripped_match = None
+            for lyr in QgsProject.instance().mapLayers().values():
+                try:
+                    lyr_source_raw = lyr.source()
+                    if lyr_source_raw == value:
+                        return lyr
+                    lyr_source = self._strip_qgis_source_uri_suffix(lyr_source_raw)
+                    if stripped_match is None and lyr_source == stripped:
+                        stripped_match = lyr
+                except Exception as e:
+                    QgsMessageLog.logMessage(
+                        f"GeoEngine: skipping layer '{lyr.id()}' ({lyr.name()}) during source URI"
+                        f" lookup: {e}\n{traceback.format_exc()}",
+                        "GeoEngine",
+                        0,
+                    )
+            if stripped_match is not None:
+                return stripped_match
+            # No matching project layer — if the string is an existing file
+            # path, return it directly.  This avoids calling parameterAsLayer
+            # on a plain file (e.g. .txt, .csv) which can cause QGIS to load
+            # it as a delimited-text layer whose .source() returns a mangled
+            # URI with query parameters rather than the clean path the worker
+            # expects.
+            if os.path.isfile(stripped):
+                return value
+        # For non-string values (e.g. QgsMapLayer objects passed directly),
+        # return as-is.
+        if hasattr(value, 'source'):
+            return value
         return value
 
     def processAlgorithm(

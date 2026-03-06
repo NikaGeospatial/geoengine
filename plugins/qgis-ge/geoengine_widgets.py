@@ -1,343 +1,162 @@
-from qgis.PyQt.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout,
-    QRadioButton, QButtonGroup, QFrame,
-    QStackedWidget, QSizePolicy
-)
-import os
-from qgis.PyQt.QtCore import Qt
-from qgis.core import (
-    QgsProcessingParameterDefinition,
-    QgsProcessingParameterMapLayer,
-    QgsProcessingParameterFile,
-    QgsProcessingContext,
-    QgsProcessingParameterType,
-    QgsProcessingFeedback,
-)
+import traceback
+
+from qgis.core import QgsMessageLog, QgsProcessingParameterDefinition
 from qgis.gui import (
     QgsAbstractProcessingParameterWidgetWrapper,
-    QgsProcessingParameterWidgetContext,
     QgsProcessingGui,
+    QgsMapLayerComboBox,
+    QgsProcessingParameterWidgetFactoryInterface
 )
-import qgis.gui
+from qgis.PyQt.QtCore import Qt, QUrl
+from qgis.PyQt.QtWidgets import (
+    QWidget, QHBoxLayout, QPushButton, QFileDialog
+)
 
-"""
-Custom QGIS Processing Parameter: QgsProcessingParameterLayerOrFile
-=======================================================
-A parameter that lets the user choose between a map layer or a file input
-via a radio button selector. Only the relevant widget is shown at a time.
 
-Usage in your algorithm's initAlgorithm():
-    self.addParameter(
-        QgsProcessingParameterLayerOrFile(
-            name='INPUT',
-            description='Input Layer or File',
-        )
-    )
+def _strip_qgis_source_uri_suffix(source: str) -> str:
+    """Strip QGIS provider URI suffixes like '|layername=foo' from local file sources."""
+    if not source:
+        return source
+    if source.startswith("file://"):
+        local = QUrl(source).toLocalFile()
+        if local:
+            source = local
+    if '|' in source:
+        source = source.split('|', 1)[0]
+    return source
 
-Then in processAlgorithm(), retrieve the value with:
-    value = self.parameterAsLayerOrFile(parameters, 'INPUT', context)
-    # Returns either a QgsMapLayer or a file path string.
-"""
 
-# ---------------------------------------------------------------------------
-# 1. The Parameter Definition
-# ---------------------------------------------------------------------------
+class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
 
-class QgsProcessingParameterLayerOrFile(QgsProcessingParameterDefinition):
-    """
-    A custom processing parameter that wraps either a MapLayer or a File
-    parameter, selectable via radio buttons in the UI.
-    """
-
-    # Custom type string — must be unique across all parameters in QGIS
-    TYPE = 'layer_or_file'
-
-    def __init__(
-        self,
-        name,
-        description='',
-        default=None,
-        optional=False,
-        filetypes=None,
-    ):
-        super().__init__(name, description, default, optional)
-        # Keep only concrete extensions; ".*" means wildcard/all files.
-        self._filetypes = [
-            str(ft).strip() for ft in (filetypes or []) if str(ft).strip() and str(ft).strip() != ".*"
-        ]
-
-    def clone(self):
-        optional = bool(
-            self.flags() & qgis.core.Qgis.ProcessingParameterFlag.Optional
-        )
-        cloned = QgsProcessingParameterLayerOrFile(
-            self.name(),
-            self.description(),
-            self.defaultValue(),
-            optional,
-            filetypes=self._filetypes,
-        )
-        return cloned
-
-    def type(self):
-        return self.TYPE
-
-    def checkValueIsAcceptable(self, value, context=None):
-        # Accept anything a layer or file parameter would accept
-        if value is None or value == "":
-            return bool(
-                self.flags() & qgis.core.Qgis.ProcessingParameterFlag.Optional
-            )
-        return True
-
-    def valueAsPythonString(self, value, context):
-        if value is None:
-            return 'None'
-        return repr(value)
-
-    def asScriptCode(self):
-        return f"###{self.name()}=layer_or_file"
-
-    def filetypes(self):
-        return list(self._filetypes)
-
-# ---------------------------------------------------------------------------
-# 2. The Widget (shown inside the Processing dialog)
-# ---------------------------------------------------------------------------
-
-class QgsLayerOrFileParameterWidget(QWidget):
-    """
-    The actual UI widget. Shows radio buttons on the left and the
-    appropriate sub-widget (layer or file picker) on the right.
-    """
-
-    def __init__(self, param, dialog, row=0, col=0, parent=None):
-        super().__init__(parent)
-        self._param = param
-        self._dialog = dialog
-        self._file_filter = self._build_file_filter(param)
-
-        # --- Root layout: radio buttons on left, dynamic widget on right ---
-        root_layout = QHBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(6)
-
-        # --- Radio buttons stacked vertically, flushed left ---
-        radio_frame = QFrame()
-        radio_layout = QVBoxLayout(radio_frame)
-        radio_layout.setContentsMargins(0, 0, 0, 0)
-        radio_layout.setSpacing(1)
-
-        self._radio_layer = QRadioButton("Layer")
-        self._radio_file = QRadioButton("File")
-        self._radio_layer.setChecked(True)
-
-        self._button_group = QButtonGroup(self)
-        self._button_group.addButton(self._radio_layer)
-        self._button_group.addButton(self._radio_file)
-        self._button_group.setExclusive(True)
-
-        radio_layout.addWidget(self._radio_layer)
-        radio_layout.addWidget(self._radio_file)
-        radio_layout.addStretch(1)
-        root_layout.addWidget(radio_frame, 0, Qt.AlignTop)  # stretch=0 keeps it tight
-
-        # --- Build inner layer parameter widget ---
-        self._layer_param = QgsProcessingParameterMapLayer(
-            param.name() + '_layer',
-            param.description(),
-            optional=bool(param.flags() & qgis.core.Qgis.ProcessingParameterFlag.Optional)
-        )
-        self._layer_wrapper = self._make_wrapper(self._layer_param)
-        self._layer_widget = self._layer_wrapper.createWrappedWidget(
-            QgsProcessingContext()
-        )
-
-        # --- Build inner file parameter widget ---
-        self._file_param = QgsProcessingParameterFile(
-            param.name() + '_file',
-            param.description(),
-            optional=bool(param.flags() & qgis.core.Qgis.ProcessingParameterFlag.Optional)
-        )
-        if hasattr(self._file_param, 'setFileFilter'):
-            self._file_param.setFileFilter(self._file_filter)
-        self._file_wrapper = self._make_wrapper(self._file_param)
-        self._file_widget = self._file_wrapper.createWrappedWidget(
-            QgsProcessingContext()
-        )
-
-        # Stack both sub-widgets; only the active one is shown
-        self._stack = QStackedWidget()
-        self._stack.addWidget(self._layer_widget)  # index 0
-        self._stack.addWidget(self._file_widget)   # index 1
-        self._stack.setContentsMargins(0, 0, 0, 0)
-        max_width = max(self._layer_widget.sizeHint().width(), self._file_widget.sizeHint().width())
-        max_height = max(self._layer_widget.sizeHint().height(), self._file_widget.sizeHint().height())
-        self._stack.setMinimumSize(max_width, max_height)
-        self._stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._set_mode(True)
-        root_layout.addWidget(self._stack, 1, Qt.AlignTop)
-
-        # Connect radio buttons
-        self._radio_layer.toggled.connect(
-            lambda checked: self._on_mode_changed(True, checked)
-        )
-        self._radio_file.toggled.connect(
-            lambda checked: self._on_mode_changed(False, checked)
-        )
-
-    def _make_wrapper(self, param):
-        """Create a standard widget wrapper for a built-in parameter type."""
-        registry = qgis.gui.QgsGui.processingGuiRegistry()
-        wrapper = registry.createParameterWidgetWrapper(
-            param, QgsProcessingGui.Standard
-        )
-        return wrapper
-
-    @staticmethod
-    def _build_file_filter(param):
-        filetypes = []
-        if hasattr(param, 'filetypes'):
-            try:
-                filetypes = param.filetypes() or []
-            except Exception:
-                filetypes = []
-
-        patterns = []
-        for filetype in filetypes:
-            ext = str(filetype).strip()
-            if not ext:
-                continue
-            if ext.startswith("*."):
-                patterns.append(ext)
-            elif ext.startswith("."):
-                patterns.append(f"*{ext}")
-            elif ext == "*":
-                patterns.append("*.*")
-            else:
-                patterns.append(f"*.{ext.lstrip('*.')}")
-
-        if not patterns:
-            return "All files (*.*)"
-
-        unique_patterns = " ".join(sorted(set(patterns)))
-        return f"Accepted files ({unique_patterns});;All files (*.*)"
-
-    def _set_mode(self, use_layer):
-        self._stack.setCurrentIndex(0 if use_layer else 1)
-
-    def _on_mode_changed(self, use_layer, checked):
-        """Toggle visibility of the sub-widgets based on radio selection."""
-        if checked:
-            self._set_mode(use_layer)
-
-    def is_layer_mode(self):
-        return self._radio_layer.isChecked()
-
-    def value(self):
-        """Return the current value from whichever widget is active."""
-        if self.is_layer_mode():
-            return self._layer_wrapper.parameterValue()
-        else:
-            return self._file_wrapper.parameterValue()
-
-    def setValue(self, value):
-        """Pre-populate the widget with an existing value."""
-        if value is not None:
-            # If it looks like a file path, switch to file mode
-            if isinstance(value, str) and (
-                os.path.isabs(value) or os.path.sep in value or '/' in value or '\\' in value
-            ):
-                self._radio_file.setChecked(True)
-                self._file_wrapper.setParameterValue(value, QgsProcessingContext())
-            else:
-                self._radio_layer.setChecked(True)
-                self._layer_wrapper.setParameterValue(value, QgsProcessingContext())
-
-# ---------------------------------------------------------------------------
-# 3. The Widget Wrapper (bridges the widget and the Processing framework)
-# ---------------------------------------------------------------------------
-
-class QgsLayerOrFileParameterWidgetWrapper(QgsAbstractProcessingParameterWidgetWrapper):
-    """
-    The glue between QGIS Processing and our custom widget.
-    This is what the Processing dialog actually instantiates.
-    """
-
-    def __init__(self, parameter, dialog, row=0, col=0, parent=None):
-        super().__init__(parameter, QgsProcessingGui.Standard)
-        # Cache the parameter definition now while the C++ object is still
-        # alive.  By the time createWidget() is called the underlying C++
-        # QgsAbstractProcessingParameterWidgetWrapper may already have been
-        # deleted (ownership transferred to C++), which makes
-        # self.parameterDefinition() crash with "wrapped C/C++ object …
-        # has been deleted".
-        self._param_def = parameter
-        self._widget = None
+    def __init__(self, parameter, dialog_type=QgsProcessingGui.Standard, row=0, col=0, **kwargs):
+        # The old-style wrapper factory (wrappers.py) passes the AlgorithmDialog
+        # object as the second argument instead of a QgsProcessingGui.DialogType
+        # integer.  Detect that case and extract the correct enum value so the
+        # C++ base-class constructor receives the type it expects.
+        if not isinstance(dialog_type, int):
+            dialog_type = getattr(dialog_type, 'dialog_type',
+                                  QgsProcessingGui.Standard)
+        super().__init__(parameter, dialog_type)
 
     def createWidget(self):
-        self._widget = QgsLayerOrFileParameterWidget(
-            self._param_def,
-            None,
+        # Outer container
+        self._widget = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._widget.setLayout(layout)
+
+        # Left: map layer combo box
+        self._combo = QgsMapLayerComboBox()
+        is_optional = bool(
+            self.parameterDefinition().flags() & QgsProcessingParameterDefinition.FlagOptional
         )
+        self._combo.setAllowEmptyLayer(is_optional)
+        self._combo.layerChanged.connect(self._on_layer_changed)
+        layout.addWidget(self._combo, stretch=1, alignment=Qt.AlignmentFlag.AlignTop)
+
+        # Right: file picker button
+        self._button = QPushButton("…")
+        self._button.setFixedWidth(23)
+        self._button.setFixedHeight(18)
+        self._button.setStyleSheet("font-size: 10px;")
+        self._button.setToolTip("Select a file")
+        self._button.clicked.connect(self._pick_file)
+        layout.addWidget(self._button, alignment=Qt.AlignmentFlag.AlignTop)
+
+        self._file_path = ""
+        self._use_file = False
+
+        # Build the file-dialog filter from the filetypes declared in metadata.
+        # e.g. ['.txt', '.csv'] → "Accepted files (*.txt *.csv);;All Files (*)"
+        # An empty list means no restriction → "All Files (*)"
+        filetypes = []
+        try:
+            meta = self.parameterDefinition().metadata()
+            filetypes = meta.get('widget_wrapper', {}).get('filetypes', []) or []
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"GeoEngine: could not read filetypes from parameterDefinition().metadata(),"
+                f" falling back to accept all files: {e}\n{traceback.format_exc()}",
+                "GeoEngine",
+                0,
+            )
+        if filetypes:
+            pattern = " ".join(f"*{ft}" for ft in filetypes)
+            self._file_filter = f"Accepted files ({pattern});;All Files (*)"
+        else:
+            self._file_filter = "All Files (*)"
+
         return self._widget
 
+    def _on_layer_changed(self, layer):
+        # Keep file mode only when the combo is currently on the explicit
+        # file entry we injected; otherwise clear file-mode state.
+        selected_text = self._combo.currentText()
+        is_file_entry_selected = (
+            layer is None
+            and bool(self._file_path)
+            and selected_text == self._file_path
+        )
+        if not is_file_entry_selected:
+            self._file_path = ""
+            self._use_file = False
+
+    def _pick_file(self):
+        # Use the button (the click sender) as parent — self._widget may have
+        # been deleted by C++ (ownership transferred to the Processing dialog).
+        try:
+            import sip
+            parent = self._button if not sip.isdeleted(self._button) else None
+        except Exception:
+            parent = None
+        path, _ = QFileDialog.getOpenFileName(
+            parent,
+            "Select File",
+            "",
+            self._file_filter
+        )
+        if path:
+            self._file_path = path
+            self._use_file = True
+            self._reflect_file_in_combo(path)
+
+    def _reflect_file_in_combo(self, path):
+        """
+        Show the selected file's name in the combo box without loading
+        it as a map layer.  Uses setAdditionalItems to append the
+        filename as a plain-text entry, then selects it.
+        """
+        items = self._combo.additionalItems()
+        if path not in items:
+            items.append(path)
+            self._combo.setAdditionalItems(items)
+        idx = self._combo.findText(path)
+        if idx >= 0:
+            self._combo.setCurrentIndex(idx)
+
     def setWidgetValue(self, value, context):
-        if self._widget:
-            self._widget.setValue(value)
+        if value:
+            self._file_path = str(value)
+            self._use_file = True
+            self._reflect_file_in_combo(self._file_path)
+        else:
+            self._file_path = ""
+            self._use_file = False
 
     def widgetValue(self):
-        if self._widget:
-            return self._widget.value()
-        return None
+        if self._use_file and self._file_path:
+            return self._file_path
+        layer = self._combo.currentLayer()
+        if layer:
+            return layer.source()
+        return ""
 
-# ---------------------------------------------------------------------------
-# 4. The Widget Factory (registers our wrapper with QGIS)
-# ---------------------------------------------------------------------------
+    def postInitialize(self, wrappers):
+        pass
 
-class QgsLayerOrFileParameterWidgetFactory(qgis.gui.QgsProcessingParameterWidgetFactoryInterface):
-    """
-    Tells the Processing GUI how to create widgets for LayerOrFileParameter.
-    Register this once when your plugin loads.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._wrappers = []
+class MapLayerWithFileFactory(QgsProcessingParameterWidgetFactoryInterface):
+    def createWidgetWrapper(self, param, dialog_type):
+        return MapLayerWithFileWrapper(param, dialog_type)
 
     def parameterType(self):
-        return QgsProcessingParameterLayerOrFile.TYPE
-
-    def createWidgetWrapper(self, parameter, type):
-        wrapper = QgsLayerOrFileParameterWidgetWrapper(parameter, None)
-        self._wrappers.append(wrapper)
-        return wrapper
-
-# ---------------------------------------------------------------------------
-# 5. The Parameter Type (registers the parameter with QGIS Processing core)
-# ---------------------------------------------------------------------------
-
-class QgsProcessingParameterLayerOrFileType(QgsProcessingParameterType):
-    """
-    Registers LayerOrFileParameter so QGIS Processing core knows about it.
-    Register this once when your plugin loads.
-    """
-
-    def create(self, name):
-        return QgsProcessingParameterLayerOrFile(name)
-
-    def metadata(self):
-        return {
-            'name': 'Layer or File',
-            'description': 'Choose between a map layer or a file path.',
-            'id': QgsProcessingParameterLayerOrFile.TYPE,
-        }
-
-    def id(self):
-        return QgsProcessingParameterLayerOrFile.TYPE
-
-    def name(self):
-        return 'Layer or File'
-
-    def className(self):
-        return 'LayerOrFileParameter'
+        return "map_layer_with_file"
