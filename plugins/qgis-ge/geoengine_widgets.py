@@ -82,10 +82,15 @@ class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
         return self._widget
 
     def _on_layer_changed(self, layer):
-        # User picked a real layer — clear any file selection.
-        # Ignore None signals: those fire when a file is added as an
-        # additional item and selected, which should not reset _file_path.
-        if layer is not None:
+        # Keep file mode only when the combo is currently on the explicit
+        # file entry we injected; otherwise clear file-mode state.
+        selected_text = self._combo.currentText()
+        is_file_entry_selected = (
+            layer is None
+            and bool(self._file_path)
+            and selected_text == self._file_path
+        )
+        if not is_file_entry_selected:
             self._file_path = ""
             self._use_file = False
 
@@ -127,13 +132,16 @@ class MapLayerWithFileWrapper(QgsAbstractProcessingParameterWidgetWrapper):
             self._file_path = str(value)
             self._use_file = True
             self._reflect_file_in_combo(self._file_path)
+        else:
+            self._file_path = ""
+            self._use_file = False
 
     def widgetValue(self):
         if self._use_file and self._file_path:
             return self._file_path
         layer = self._combo.currentLayer()
         if layer:
-            return _strip_qgis_source_uri_suffix(layer.source())
+            return layer.source()
         return ""
 
     def postInitialize(self, wrappers):

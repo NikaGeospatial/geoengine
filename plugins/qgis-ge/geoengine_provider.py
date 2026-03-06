@@ -1022,11 +1022,15 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
             # Search by source URI (e.g. the combo box may store the layer's
             # source path rather than its layer ID).
             stripped = self._strip_qgis_source_uri_suffix(value)
+            stripped_match = None
             for lyr in QgsProject.instance().mapLayers().values():
                 try:
-                    lyr_source = self._strip_qgis_source_uri_suffix(lyr.source())
-                    if lyr_source == stripped:
+                    lyr_source_raw = lyr.source()
+                    if lyr_source_raw == value:
                         return lyr
+                    lyr_source = self._strip_qgis_source_uri_suffix(lyr_source_raw)
+                    if stripped_match is None and lyr_source == stripped:
+                        stripped_match = lyr
                 except Exception as e:
                     QgsMessageLog.logMessage(
                         f"GeoEngine: skipping layer '{lyr.id()}' ({lyr.name()}) during source URI"
@@ -1034,6 +1038,8 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                         "GeoEngine",
                         0,
                     )
+            if stripped_match is not None:
+                return stripped_match
             # No matching project layer — if the string is an existing file
             # path, return it directly.  This avoids calling parameterAsLayer
             # on a plain file (e.g. .txt, .csv) which can cause QGIS to load
