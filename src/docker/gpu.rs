@@ -102,8 +102,8 @@ async fn detect_nvidia() -> Result<GpuConfig> {
 /// Verify NVIDIA Container Toolkit is properly configured
 fn verify_nvidia_docker() -> Result<()> {
     // Check for nvidia-container-toolkit or nvidia-docker
-    let has_toolkit = which::which("nvidia-container-cli").is_ok()
-        || which::which("nvidia-docker").is_ok();
+    let has_toolkit =
+        which::which("nvidia-container-cli").is_ok() || which::which("nvidia-docker").is_ok();
 
     if !has_toolkit {
         // Check if the Docker runtime is configured

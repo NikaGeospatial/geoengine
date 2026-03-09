@@ -45,9 +45,7 @@ impl ImageCommands {
         let client = DockerClient::new().await?;
 
         match self {
-            Self::Import { tarfile, tag } => {
-                import_image(&client, &tarfile, tag.as_deref()).await
-            }
+            Self::Import { tarfile, tag } => import_image(&client, &tarfile, tag.as_deref()).await,
             Self::List { filter, all } => list_images(&client, filter.as_deref(), all).await,
             Self::Remove { image, force } => remove_image(&client, &image, force).await,
         }
@@ -96,10 +94,7 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
         return Ok(());
     }
 
-    println!("{}{}",
-        " ".repeat(38),
-        "PUSHED IMAGES".bold()
-    );
+    println!("{}{}", " ".repeat(38), "PUSHED IMAGES".bold());
     println!(
         "{:<50} {:<20} {:<15} {}",
         "REPOSITORY:TAG".bold(),
@@ -126,10 +121,7 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
     }
 
     println!();
-    println!("{}{}",
-         " ".repeat(40),
-         "DEV IMAGES".bold()
-    );
+    println!("{}{}", " ".repeat(40), "DEV IMAGES".bold());
     println!(
         "{:<50} {:<20} {:<15} {}",
         "REPOSITORY:TAG".bold(),

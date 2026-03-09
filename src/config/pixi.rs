@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PixiConfig {
@@ -27,7 +27,7 @@ pub struct PixiWorkspaceConfig {
     /// Channels to install from (required)
     channels: Vec<String>,
     /// Platforms that the project supports (required)
-    platforms: Vec<String>
+    platforms: Vec<String>,
 }
 
 /// Represents a dependency specification in the Pixi ecosystem, which can be either
@@ -41,7 +41,7 @@ pub enum PixiDepSpec {
         channel: Option<String>,
         extras: Option<Vec<String>>,
         git: Option<String>,
-    }
+    },
 }
 
 impl PixiConfig {
@@ -52,7 +52,7 @@ impl PixiConfig {
             version: Some("0.1.0".to_string()),
             description: Some("A geoengine project".to_string()),
             channels: vec!["conda-forge".to_string()],
-            platforms: vec!["linux-64".to_string(), "linux-aarch64".to_string()]
+            platforms: vec!["linux-64".to_string(), "linux-aarch64".to_string()],
         }
     }
 
@@ -60,39 +60,68 @@ impl PixiConfig {
     pub fn py_template(name: &str) -> Self {
         PixiConfig {
             workspace: Self::workspace_config(name),
-            dependencies: HashMap::from(
-                [
-                    ("python".to_string(), PixiDepSpec::Simple(">=3.11,<3.13".to_string())),
-                    ("pip".to_string(), PixiDepSpec::Simple("*".to_string())),
-                    ("gdal".to_string(), PixiDepSpec::Simple(">=3.9.0,<4".to_string())),
-                    ("fiona".to_string(), PixiDepSpec::Simple(">=1.9,<2".to_string())),
-                    ("shapely".to_string(), PixiDepSpec::Simple(">=2.0,<3".to_string())),
-                    ("pyproj".to_string(), PixiDepSpec::Simple(">=3.6,<4".to_string())),
-                    ("geopandas".to_string(), PixiDepSpec::Simple(">=0.14,<1".to_string())),
-                    ("numpy".to_string(), PixiDepSpec::Simple(">=1.26,<3".to_string())),
-                    ("scipy".to_string(), PixiDepSpec::Simple(">=1.11,<2".to_string())),
-                    ("pandas".to_string(), PixiDepSpec::Simple(">=2.1,<3".to_string())),
-                    ("zarr".to_string(), PixiDepSpec::Simple("*".to_string())),
-                    ("xarray".to_string(), PixiDepSpec::Simple("*".to_string())),
-                ]
-            ),
+            dependencies: HashMap::from([
+                (
+                    "python".to_string(),
+                    PixiDepSpec::Simple(">=3.11,<3.13".to_string()),
+                ),
+                ("pip".to_string(), PixiDepSpec::Simple("*".to_string())),
+                (
+                    "gdal".to_string(),
+                    PixiDepSpec::Simple(">=3.9.0,<4".to_string()),
+                ),
+                (
+                    "fiona".to_string(),
+                    PixiDepSpec::Simple(">=1.9,<2".to_string()),
+                ),
+                (
+                    "shapely".to_string(),
+                    PixiDepSpec::Simple(">=2.0,<3".to_string()),
+                ),
+                (
+                    "pyproj".to_string(),
+                    PixiDepSpec::Simple(">=3.6,<4".to_string()),
+                ),
+                (
+                    "geopandas".to_string(),
+                    PixiDepSpec::Simple(">=0.14,<1".to_string()),
+                ),
+                (
+                    "numpy".to_string(),
+                    PixiDepSpec::Simple(">=1.26,<3".to_string()),
+                ),
+                (
+                    "scipy".to_string(),
+                    PixiDepSpec::Simple(">=1.11,<2".to_string()),
+                ),
+                (
+                    "pandas".to_string(),
+                    PixiDepSpec::Simple(">=2.1,<3".to_string()),
+                ),
+                ("zarr".to_string(), PixiDepSpec::Simple("*".to_string())),
+                ("xarray".to_string(), PixiDepSpec::Simple("*".to_string())),
+            ]),
             pypi_dependencies: None,
         }
     }
 
     /// Generate base template using workspace configuration (for R + GDAL)
     pub fn r_template(name: &str) -> Self {
-        PixiConfig{
+        PixiConfig {
             workspace: Self::workspace_config(name),
-            dependencies: HashMap::from(
-                [
-                    ("r-base".to_string(), PixiDepSpec::Simple(">=4.3".to_string())),
-                    ("r-recommended".to_string(), PixiDepSpec::Simple("*".to_string())),
-                    ("r-sf".to_string(), PixiDepSpec::Simple("*".to_string())),
-                    ("r-terra".to_string(), PixiDepSpec::Simple("*".to_string())),
-                    ("r-stars".to_string(), PixiDepSpec::Simple("*".to_string())),
-                ]
-            ),
+            dependencies: HashMap::from([
+                (
+                    "r-base".to_string(),
+                    PixiDepSpec::Simple(">=4.3".to_string()),
+                ),
+                (
+                    "r-recommended".to_string(),
+                    PixiDepSpec::Simple("*".to_string()),
+                ),
+                ("r-sf".to_string(), PixiDepSpec::Simple("*".to_string())),
+                ("r-terra".to_string(), PixiDepSpec::Simple("*".to_string())),
+                ("r-stars".to_string(), PixiDepSpec::Simple("*".to_string())),
+            ]),
             pypi_dependencies: None,
         }
     }

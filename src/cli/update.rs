@@ -1,13 +1,18 @@
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
+use reqwest::Response;
 use sha2::{Digest, Sha256};
 use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 pub async fn update_geoengine() -> Result<()> {
     // --- 1. Detect installation method ---
     let method = detect_install_method().await;
-    println!("{}", format!("Detected install method: {}", method.label()).cyan());
+    println!(
+        "{}",
+        format!("Detected install method: {}", method.label()).cyan()
+    );
 
     // --- 2. Run the update ---
     match method {
@@ -55,7 +60,8 @@ async fn detect_install_method() -> InstallMethod {
                 .args(["list", "--formula", "geoengine"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status().await
+                .status()
+                .await
                 .map(|s| s.success())
                 .unwrap_or(false)
         {
@@ -97,24 +103,39 @@ async fn update_via_shell() -> Result<()> {
         tag, archive_name
     );
 
-    println!("{}", format!("==> Downloading {} @ {}", archive_name, tag).blue());
-    let archive_bytes = fetch_bytes(&archive_url)
-        .await
-        .with_context(|| format!("Failed to download {}", archive_url))?;
+    println!(
+        "{}",
+        format!("==> Downloading {} @ {}", archive_name, tag).blue()
+    );
+    let req_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
 
-    verify_checksum(&archive_bytes, &archive_name, &tag).await?;
+    let expected_hash = fetch_expected_checksum(&archive_name, &tag, &req_client).await?;
+    let (archive_path, actual_hash) =
+        download_to_temp_file(&archive_url, &req_client, "geoengine_archive", "tar.gz")
+            .await
+            .with_context(|| format!("Failed to download {}", archive_url))?;
 
-    // Extract the binary directly from the in-memory archive bytes.
-    let tmp_binary = extract_binary_from_tar_bytes(&archive_bytes)?;
+    verify_checksum(&archive_name, &expected_hash, &actual_hash)?;
+
+    // Extract the binary directly from the on-disk archive.
+    let tmp_binary = extract_binary_from_tar_path(&archive_path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&archive_path);
+    })?;
+    let _ = std::fs::remove_file(&archive_path);
 
     let script_url = format!(
         "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.sh",
         tag
     );
     println!("{}", format!("==> Downloading install.sh @ {}", tag).blue());
-    let script_bytes = fetch_bytes(&script_url).await.inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp_binary);
-    }).context("Failed to download install.sh")?;
+    let script_bytes = fetch_bytes(&script_url, &req_client)
+        .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp_binary);
+        })
+        .context("Failed to download install.sh")?;
 
     let tmp_script = write_temp_script(&script_bytes, "install", "sh").inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp_binary);
@@ -122,7 +143,12 @@ async fn update_via_shell() -> Result<()> {
 
     println!(
         "{}",
-        format!("==> bash {} --local {}", tmp_script.display(), tmp_binary.display()).blue()
+        format!(
+            "==> bash {} --local {}",
+            tmp_script.display(),
+            tmp_binary.display()
+        )
+        .blue()
     );
     let status = Command::new("bash")
         .arg(tmp_script.as_os_str())
@@ -157,24 +183,42 @@ async fn update_via_powershell() -> Result<()> {
         tag, archive_name
     );
 
-    println!("{}", format!("==> Downloading {} @ {}", archive_name, tag).blue());
-    let archive_bytes = fetch_bytes(&archive_url)
-        .await
-        .with_context(|| format!("Failed to download {}", archive_url))?;
+    println!(
+        "{}",
+        format!("==> Downloading {} @ {}", archive_name, tag).blue()
+    );
+    let req_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
 
-    verify_checksum(&archive_bytes, &archive_name, &tag).await?;
+    let expected_hash = fetch_expected_checksum(&archive_name, &tag, &req_client).await?;
+    let (archive_path, actual_hash) =
+        download_to_temp_file(&archive_url, &req_client, "geoengine_archive", "zip")
+            .await
+            .with_context(|| format!("Failed to download {}", archive_url))?;
 
-    // Extract geoengine.exe directly from the in-memory archive bytes.
-    let tmp_binary = extract_binary_from_zip_bytes(&archive_bytes)?;
+    verify_checksum(&archive_name, &expected_hash, &actual_hash)?;
+
+    // Extract geoengine.exe directly from the on-disk archive.
+    let tmp_binary = extract_binary_from_zip_path(&archive_path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&archive_path);
+    })?;
+    let _ = std::fs::remove_file(&archive_path);
 
     let script_url = format!(
         "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.ps1",
         tag
     );
-    println!("{}", format!("==> Downloading install.ps1 @ {}", tag).blue());
-    let script_bytes = fetch_bytes(&script_url).await.inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp_binary);
-    }).context("Failed to download install.ps1")?;
+    println!(
+        "{}",
+        format!("==> Downloading install.ps1 @ {}", tag).blue()
+    );
+    let script_bytes = fetch_bytes(&script_url, &req_client)
+        .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp_binary);
+        })
+        .context("Failed to download install.ps1")?;
 
     let tmp_script = write_temp_script(&script_bytes, "install", "ps1").inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp_binary);
@@ -244,8 +288,7 @@ fn current_platform() -> Result<&'static str> {
     }
 }
 
-/// Download `checksums.txt` for `tag`, find the line for `archive_name`,
-/// and verify that the SHA256 of `data` matches.
+/// Download `checksums.txt` for `tag` and return the expected SHA256 for `archive_name`.
 ///
 /// # Trust model
 ///
@@ -256,14 +299,18 @@ fn current_platform() -> Result<&'static str> {
 /// replace `checksums.txt` with matching hashes. The primary security
 /// guarantee here is transport integrity via HTTPS; the checksum file provides
 /// an additional layer for detecting bit-rot or partial downloads.
-async fn verify_checksum(data: &[u8], archive_name: &str, tag: &str) -> Result<()> {
+async fn fetch_expected_checksum(
+    archive_name: &str,
+    tag: &str,
+    req_client: &reqwest::Client,
+) -> Result<String> {
     let checksums_url = format!(
         "https://github.com/NikaGeospatial/geoengine/releases/download/{}/checksums.txt",
         tag
     );
 
     println!("{}", "==> Fetching checksums.txt...".blue());
-    let checksums_text = fetch_bytes(&checksums_url)
+    let checksums_text = fetch_bytes(&checksums_url, &req_client)
         .await
         .context("Failed to download checksums.txt")?;
     let checksums_text =
@@ -307,9 +354,11 @@ async fn verify_checksum(data: &[u8], archive_name: &str, tag: &str) -> Result<(
         );
     }
 
-    let actual_hash = format!("{:x}", Sha256::digest(data));
+    Ok(expected_hash)
+}
 
-    if actual_hash != expected_hash {
+fn verify_checksum(archive_name: &str, expected_hash: &str, actual_hash: &str) -> Result<()> {
+    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
         bail!(
             "Checksum mismatch for {}!\n  expected: {}\n  actual:   {}",
             archive_name,
@@ -318,14 +367,19 @@ async fn verify_checksum(data: &[u8], archive_name: &str, tag: &str) -> Result<(
         );
     }
 
-    println!("{}", format!("✓ Checksum verified ({})", &actual_hash[..16]).green());
+    println!(
+        "{}",
+        format!("✓ Checksum verified ({})", &actual_hash[..16]).green()
+    );
     Ok(())
 }
 
-/// Extract the `geoengine` binary from in-memory `.tar.gz` bytes
+/// Extract the `geoengine` binary from an on-disk `.tar.gz` archive
 /// and write it to a temp file. Returns the path to the binary.
-fn extract_binary_from_tar_bytes(data: &[u8]) -> Result<std::path::PathBuf> {
-    let gz = flate2::read::GzDecoder::new(data);
+fn extract_binary_from_tar_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open archive {}", path.display()))?;
+    let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
 
     let out_path = std::env::temp_dir().join(format!("geoengine_{}_bin", std::process::id()));
@@ -340,8 +394,9 @@ fn extract_binary_from_tar_bytes(data: &[u8]) -> Result<std::path::PathBuf> {
         if name == "geoengine" {
             let mut out_file = std::fs::File::create(&out_path)
                 .with_context(|| format!("Failed to create {}", out_path.display()))?;
-            std::io::copy(&mut entry, &mut out_file)
-                .context("Failed to extract binary from tar")?;
+            std::io::copy(&mut entry, &mut out_file).inspect_err(|_| {
+                let _ = std::fs::remove_file(&out_path);
+            })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -354,14 +409,14 @@ fn extract_binary_from_tar_bytes(data: &[u8]) -> Result<std::path::PathBuf> {
     bail!("Binary 'geoengine' not found inside tar.gz archive")
 }
 
-/// Extract `geoengine.exe` from in-memory `.zip` bytes
+/// Extract `geoengine.exe` from an on-disk `.zip` archive
 /// and write it to a temp file. Returns the path to the binary.
-fn extract_binary_from_zip_bytes(data: &[u8]) -> Result<std::path::PathBuf> {
-    let cursor = std::io::Cursor::new(data);
-    let mut zip = zip::ZipArchive::new(cursor).context("Failed to read zip archive")?;
+fn extract_binary_from_zip_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open archive {}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(file).context("Failed to read zip archive")?;
 
-    let out_path =
-        std::env::temp_dir().join(format!("geoengine_{}_bin.exe", std::process::id()));
+    let out_path = std::env::temp_dir().join(format!("geoengine_{}_bin.exe", std::process::id()));
 
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).context("Failed to read zip entry")?;
@@ -414,10 +469,7 @@ async fn latest_release_tag() -> Result<String> {
 }
 
 /// Download a URL and return the raw bytes.
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
+async fn fetch_bytes(url: &str, client: &reqwest::Client) -> Result<Vec<u8>> {
     let bytes = client
         .get(url)
         .header("User-Agent", APP_USER_AGENT)
@@ -430,6 +482,95 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
         .await
         .with_context(|| format!("Failed to read body from {}", url))?;
     Ok(bytes.to_vec())
+}
+
+/// Download a URL to a temp file while computing SHA256. Returns (path, hash).
+async fn download_to_temp_file(
+    url: &str,
+    client: &reqwest::Client,
+    prefix: &str,
+    ext: &str,
+) -> Result<(std::path::PathBuf, String)> {
+    let response = client
+        .get(url)
+        .header("User-Agent", APP_USER_AGENT)
+        .send()
+        .await
+        .with_context(|| format!("GET {} failed", url))?
+        .error_for_status()
+        .with_context(|| format!("GET {} returned an error status", url))?;
+
+    let (path, mut file) = create_temp_file(prefix, ext).await?;
+    let mut hasher = Sha256::new();
+
+    let download_result: Result<String> = async {
+        stream_response_to_file(response, &path, &mut file, &mut hasher, url).await?;
+        file.flush()
+            .await
+            .with_context(|| format!("Failed to flush {}", path.display()))?;
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+    .await;
+
+    match download_result {
+        Ok(hash) => Ok((path, hash)),
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            Err(err)
+        }
+    }
+}
+
+async fn stream_response_to_file(
+    mut response: Response,
+    path: &std::path::Path,
+    file: &mut tokio::fs::File,
+    hasher: &mut Sha256,
+    url: &str,
+) -> Result<()> {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("Failed to read body from {}", url))?
+    {
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("Failed to write to {}", path.display()))?;
+    }
+    Ok(())
+}
+
+async fn create_temp_file(
+    prefix: &str,
+    ext: &str,
+) -> Result<(std::path::PathBuf, tokio::fs::File)> {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    for attempt in 0..10u32 {
+        let name = format!("{}_{}_{}_{}.{}", prefix, pid, now, attempt, ext);
+        let path = dir.join(name);
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("Failed to create temp file {}", path.display()))
+            }
+        }
+    }
+
+    bail!("Failed to create a unique temp file in {}", dir.display())
 }
 
 /// Write `data` to a temporary file and return the path.

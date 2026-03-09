@@ -36,8 +36,8 @@ impl Settings {
         let content = std::fs::read_to_string(&settings_path)
             .with_context(|| format!("Failed to read settings: {}", settings_path.display()))?;
 
-        let settings: Settings = serde_yaml::from_str(&content)
-            .with_context(|| "Failed to parse settings file")?;
+        let settings: Settings =
+            serde_yaml::from_str(&content).with_context(|| "Failed to parse settings file")?;
 
         Ok(settings)
     }
@@ -105,10 +105,7 @@ impl Settings {
 
     /// List all registered workers
     pub fn list_workers(&self) -> Vec<(&str, &PathBuf)> {
-        self.workers
-            .iter()
-            .map(|(k, v)| (k.as_str(), v))
-            .collect()
+        self.workers.iter().map(|(k, v)| (k.as_str(), v)).collect()
     }
 
     /// Set an environment variable
@@ -142,6 +139,8 @@ impl Settings {
 
     /// Get the value of an environment variable
     pub fn get_env(&self, key: &str) -> Option<&str> {
-        self.env.as_ref().and_then(|env| env.get(key).map(|v| v.as_str()))
+        self.env
+            .as_ref()
+            .and_then(|env| env.get(key).map(|v| v.as_str()))
     }
 }

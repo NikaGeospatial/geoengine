@@ -1,25 +1,27 @@
-use std::cmp::Ordering;
+use crate::cli::plugins;
+use crate::cli::plugins::{verify_arcgis_plugin_installed, verify_qgis_plugin_installed};
+use crate::config::pixi::PixiConfig;
+use crate::config::settings::Settings;
+use crate::config::state::{self, sha256_bytes, WorkerState};
+use crate::config::worker::WorkerConfig;
+use crate::config::yaml_store;
+use crate::docker::client::DockerClient;
+use crate::docker::container::ContainerConfig;
+use crate::docker::dockerfile;
+use crate::docker::gpu::GpuConfig;
+use crate::utils::versioning::{
+    compare_versions, compare_worker_version, get_latest_worker_version, validate_version,
+};
 use anyhow::{Context, Result};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
-use crate::config::worker::WorkerConfig;
-use crate::config::settings::Settings;
-use crate::config::state::{self, sha256_bytes, WorkerState};
-use crate::config::yaml_store;
-use crate::docker::client::DockerClient;
-use crate::docker::container::ContainerConfig;
-use crate::docker::gpu::GpuConfig;
-use crate::cli::plugins;
-use crate::cli::plugins::{verify_arcgis_plugin_installed, verify_qgis_plugin_installed};
-use crate::config::pixi::PixiConfig;
-use crate::docker::dockerfile;
-use crate::utils::versioning::{compare_versions, validate_version, get_latest_worker_version, compare_worker_version};
 // ---------------------------------------------------------------------------
 // JSON output structs (used by --json flags and plugin integration)
 // ---------------------------------------------------------------------------
@@ -30,7 +32,7 @@ struct WorkerListEntry {
     path: String,
     has_tool: bool,
     found: bool,
-    description: Option<String>
+    description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -112,7 +114,10 @@ fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     })
 }
 
-fn collect_file_fingerprints_recursive(path: &Path, out: &mut HashMap<PathBuf, FileFingerprint>) -> Result<()> {
+fn collect_file_fingerprints_recursive(
+    path: &Path,
+    out: &mut HashMap<PathBuf, FileFingerprint>,
+) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -266,19 +271,20 @@ pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
     let mut replaced_pixi = false;
     let mut replaced_conf = false;
 
-    let worker_name = name
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            current_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("my-worker")
-                .to_string()
-        });
+    let worker_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
+        current_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("my-worker")
+            .to_string()
+    });
 
     if config_path.exists() {
         let replace = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("geoengine.yaml already exists in {}. Overwrite existing geoengine.yaml?", current_dir.display()))
+            .with_prompt(format!(
+                "geoengine.yaml already exists in {}. Overwrite existing geoengine.yaml?",
+                current_dir.display()
+            ))
             .items(&["Yes", "No"])
             .default(1)
             .interact()?;
@@ -305,14 +311,17 @@ pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
 
     if pixitoml_path.exists() {
         let replace_pixi = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("pixi.toml already exists in {}. Overwrite existing pixi.toml?", current_dir.display()))
+            .with_prompt(format!(
+                "pixi.toml already exists in {}. Overwrite existing pixi.toml?",
+                current_dir.display()
+            ))
             .items(&["Yes", "No"])
             .default(1)
             .interact()?;
 
         replaced_pixi = match replace_pixi {
             0 => true,
-            _ => false
+            _ => false,
         };
     }
 
@@ -333,7 +342,10 @@ pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
 
     println!("\nNext steps:");
     println!("  1. Edit geoengine.yaml and pixi.toml to configure your worker");
-    println!("  2. Run {} to register and build", "geoengine apply".cyan());
+    println!(
+        "  2. Run {} to register and build",
+        "geoengine apply".cyan()
+    );
 
     Ok(())
 }
@@ -342,7 +354,12 @@ pub async fn init_worker(name: Option<&str>, env: Option<&str>) -> Result<()> {
 // geoengine build
 // ---------------------------------------------------------------------------
 
-pub async fn build_worker_local(no_cache: bool, dev: bool, build_args: &[String], verbose: bool) -> Result<()> {
+pub async fn build_worker_local(
+    no_cache: bool,
+    dev: bool,
+    build_args: &[String],
+    verbose: bool,
+) -> Result<()> {
     let (worker_name, _) = resolve_worker_from_cwd();
     build_worker(&worker_name, no_cache, dev, build_args, verbose).await
 }
@@ -358,7 +375,13 @@ async fn local_image_exists(client: &DockerClient, image_name: &str) -> Result<b
         .any(|image| image.repo_tags.into_iter().any(|tag| tag == image_name)))
 }
 
-pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &[String], verbose: bool) -> Result<()> {
+pub async fn build_worker(
+    worker: &str,
+    no_cache: bool,
+    dev: bool,
+    build_args: &[String],
+    verbose: bool,
+) -> Result<()> {
     let settings = Settings::load()?;
     let worker_path = settings.get_worker_path(worker)?;
     let config = yaml_store::load_saved_config(worker)?;
@@ -391,8 +414,14 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
 
     let prev_state = state::load_state(worker)?;
     let pushed_build_hash = match dev {
-        true => prev_state.as_ref().and_then(|s| s.pushed_build_hash.clone()),
-        false => Some(yaml_build_hash.clone() + dockerfile_hash.as_ref().unwrap_or(&"".to_string()) + command_hash.as_ref().unwrap_or(&"".to_string())),
+        true => prev_state
+            .as_ref()
+            .and_then(|s| s.pushed_build_hash.clone()),
+        false => Some(
+            yaml_build_hash.clone()
+                + dockerfile_hash.as_ref().unwrap_or(&"".to_string())
+                + command_hash.as_ref().unwrap_or(&"".to_string()),
+        ),
     };
     let files_changed = match dev {
         true => match &prev_state {
@@ -402,7 +431,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
                     || prev.command_hash != command_hash
             }
             None => true,
-        }
+        },
         false => match &prev_state {
             Some(prev) => pushed_build_hash != prev.pushed_build_hash,
             None => true,
@@ -451,13 +480,23 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
     let version_changed = match ver_cmp {
         Ok(c) => match c {
             Ordering::Less => {
-                let latest_built = get_latest_worker_version(worker, &client).await.unwrap_or_default();
+                let latest_built = get_latest_worker_version(worker, &client)
+                    .await
+                    .unwrap_or_default();
                 if dev {
-                    println!("{} Version is lower than latest built version: {} < {}", "!".yellow().bold(), new_version, latest_built);
+                    println!(
+                        "{} Version is lower than latest built version: {} < {}",
+                        "!".yellow().bold(),
+                        new_version,
+                        latest_built
+                    );
                     println!("{} Correct it before your next push.", " ");
                 } else {
-                    anyhow::bail!("{}\n{}: {}\n{}: {}",
-                        "New version cannot be lower than latest built version!".red().bold(),
+                    anyhow::bail!(
+                        "{}\n{}: {}\n{}: {}",
+                        "New version cannot be lower than latest built version!"
+                            .red()
+                            .bold(),
                         "New version  ",
                         new_version,
                         "Built version",
@@ -465,9 +504,9 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
                     );
                 }
                 true
-            },
+            }
             Ordering::Equal => false,
-            Ordering::Greater => true
+            Ordering::Greater => true,
         },
         Err(e) => {
             if dev {
@@ -517,10 +556,7 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
         let mp = MultiProgress::new();
 
         let pb = mp.add(ProgressBar::new_spinner());
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")?,
-        );
+        pb.set_style(ProgressStyle::default_spinner().template("{spinner:.green} {msg}")?);
         pb.set_message("Building image...");
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
@@ -537,7 +573,12 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
             }
         });
 
-        (Some(pb), Some(step_pb), Some(step_task), Some(progress_step_tx))
+        (
+            Some(pb),
+            Some(step_pb),
+            Some(step_task),
+            Some(progress_step_tx),
+        )
     };
 
     let build_result = client
@@ -575,7 +616,10 @@ pub async fn build_worker(worker: &str, no_cache: bool, dev: bool, build_args: &
     let now = chrono::Utc::now().to_rfc3339();
     let new_state = WorkerState {
         worker_name: worker.to_string(),
-        applied_at: prev_state.as_ref().map(|s| s.applied_at.clone()).unwrap_or_else(|| now.clone()),
+        applied_at: prev_state
+            .as_ref()
+            .map(|s| s.applied_at.clone())
+            .unwrap_or_else(|| now.clone()),
         built_at: Some(now),
         yaml_build_hash,
         yaml_hash: prev_state.as_ref().and_then(|s| s.yaml_hash.clone()),
@@ -609,7 +653,10 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                     let config = WorkerConfig::load(&path.join("geoengine.yaml"))?;
                     (config.name.clone(), path.canonicalize()?)
                 } else {
-                    anyhow::bail!("Worker '{}' not found and no geoengine.yaml at that path.", name);
+                    anyhow::bail!(
+                        "Worker '{}' not found and no geoengine.yaml at that path.",
+                        name
+                    );
                 }
             }
         }
@@ -679,20 +726,29 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
     // Load current config from YAML and detect changes from saved state. If changed, save it, if not exit.
     let config_changed = yaml_store::check_changed_config(&worker_name, &worker_path)?;
     if !config_changed && worker_path.clone().join("Dockerfile").exists() {
-        println!("{} No changes detected in geoengine.yaml of worker '{}'. Nothing to apply.", "!".yellow().bold(), worker_name);
+        println!(
+            "{} No changes detected in geoengine.yaml of worker '{}'. Nothing to apply.",
+            "!".yellow().bold(),
+            worker_name
+        );
         return Ok(());
     }
     let config = WorkerConfig::load(&worker_path.join("geoengine.yaml"))?;
     verify_worker_config_path_types(&config, &worker_path)?;
     if config.command.is_none() {
-        anyhow::bail!("No command specified in geoengine.yaml of worker '{}'. Cannot apply.", worker_name);
+        anyhow::bail!(
+            "No command specified in geoengine.yaml of worker '{}'. Cannot apply.",
+            worker_name
+        );
     }
     yaml_store::save_config(&config)?;
 
     // Auto-register if not already registered
     let mut settings = Settings::load()?;
     if settings.workers.get(&worker_name).is_none() {
-        let canonical = worker_path.canonicalize().unwrap_or_else(|_| worker_path.clone());
+        let canonical = worker_path
+            .canonicalize()
+            .unwrap_or_else(|_| worker_path.clone());
         settings.register_worker(&worker_name, &canonical)?;
         settings.save()?;
         println!(
@@ -713,25 +769,34 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
     let prev_state = state::load_state(&worker_name)?;
 
     // Generate the Dockerfile if not already done so
-    if !worker_path.clone().join("Dockerfile").exists()
-    {
+    if !worker_path.clone().join("Dockerfile").exists() {
         if config.command.is_some() {
             dockerfile::generate_dockerfile(&worker_path)?;
-            println!(
-                "{} Dockerfile generated.",
-                "✓".green().bold(),
-            );
-        }
-        else {
+            println!("{} Dockerfile generated.", "✓".green().bold(),);
+        } else {
             anyhow::bail!("No command specified in geoengine.yaml of worker '{}'. Cannot generate Dockerfile.", worker_name);
         }
     }
 
     // Detect and apply plugin changes
-    let cur_arcgis = config.plugins.as_ref().and_then(|p| p.arcgis).unwrap_or(false);
-    let cur_qgis = config.plugins.as_ref().and_then(|p| p.qgis).unwrap_or(false);
-    let prev_arcgis = prev_state.as_ref().and_then(|s| s.plugins_arcgis).unwrap_or(false);
-    let prev_qgis = prev_state.as_ref().and_then(|s| s.plugins_qgis).unwrap_or(false);
+    let cur_arcgis = config
+        .plugins
+        .as_ref()
+        .and_then(|p| p.arcgis)
+        .unwrap_or(false);
+    let cur_qgis = config
+        .plugins
+        .as_ref()
+        .and_then(|p| p.qgis)
+        .unwrap_or(false);
+    let prev_arcgis = prev_state
+        .as_ref()
+        .and_then(|s| s.plugins_arcgis)
+        .unwrap_or(false);
+    let prev_qgis = prev_state
+        .as_ref()
+        .and_then(|s| s.plugins_qgis)
+        .unwrap_or(false);
 
     let mut res_arcgis = cur_arcgis.clone();
     let mut res_qgis = cur_qgis.clone();
@@ -755,25 +820,29 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                     match plugins::register_arcgis(None).await {
                         Ok(_) => {
                             res_arcgis = true;
-                            plugin_change_msgs.push(format!("{} {} {}",
+                            plugin_change_msgs.push(format!(
+                                "{} {} {}",
                                 "•".yellow(),
                                 "ArcGIS plugin installed.".to_string(),
                                 "Please restart ArcGIS to see the plugin!".bold()
                             ));
-                            plugin_change_msgs.push(format!("{} {}",
+                            plugin_change_msgs.push(format!(
+                                "{} {}",
                                 "✓".green(),
                                 "Tool registered in ArcGIS plugin.".to_string()
                             ));
-                        },
+                        }
                         Err(e) => {
                             res_arcgis = false;
                             set_plugin_flag_in_yaml(&mut yaml_content, "arcgis", false)?;
                             yaml_dirty = true;
-                            plugin_change_msgs.push(format!("{} {}",
+                            plugin_change_msgs.push(format!(
+                                "{} {}",
                                 "×".red(),
                                 format!("ArcGIS plugin NOT installed: {}.", e).to_string()
                             ));
-                            plugin_change_msgs.push(format!("{} {}",
+                            plugin_change_msgs.push(format!(
+                                "{} {}",
                                 "×".red(),
                                 "Tool not registered. YAML reverted.".to_string()
                             ));
@@ -784,23 +853,27 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                     res_arcgis = false;
                     set_plugin_flag_in_yaml(&mut yaml_content, "arcgis", false)?;
                     yaml_dirty = true;
-                    plugin_change_msgs.push(format!("{} {}",
+                    plugin_change_msgs.push(format!(
+                        "{} {}",
                         "×".red(),
                         "ArcGIS plugin installation rejected.".to_string()
                     ));
-                    plugin_change_msgs.push(format!("{} {}",
+                    plugin_change_msgs.push(format!(
+                        "{} {}",
                         "×".red(),
                         "Tool not registered. YAML reverted.".to_string()
                     ));
-                },
+                }
             }
         } else if cur_arcgis && verify_arcgis_plugin_installed()? {
-            plugin_change_msgs.push(format!("{} {}",
+            plugin_change_msgs.push(format!(
+                "{} {}",
                 "✓".green(),
                 format!("Tool {} in ArcGIS plugin.", "registered".green())
             ));
         } else if !cur_arcgis && verify_arcgis_plugin_installed()? {
-            plugin_change_msgs.push(format!("{} {}",
+            plugin_change_msgs.push(format!(
+                "{} {}",
                 "✓".green(),
                 format!("Tool {} from ArcGIS plugin.", "de-registered".red())
             ));
@@ -819,25 +892,29 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                     match plugins::register_qgis(None).await {
                         Ok(_) => {
                             res_qgis = true;
-                            plugin_change_msgs.push(format!("{} {} {}",
+                            plugin_change_msgs.push(format!(
+                                "{} {} {}",
                                 "•".yellow(),
                                 "QGIS plugin installed.".to_string(),
                                 "Please restart QGIS to see the plugin!".bold()
                             ));
-                            plugin_change_msgs.push(format!("{} {}",
+                            plugin_change_msgs.push(format!(
+                                "{} {}",
                                 "✓".green(),
                                 "Tool registered in QGIS plugin.".to_string()
                             ))
-                        },
+                        }
                         Err(e) => {
                             res_qgis = false;
                             set_plugin_flag_in_yaml(&mut yaml_content, "qgis", false)?;
                             yaml_dirty = true;
-                            plugin_change_msgs.push(format!("{} {}",
+                            plugin_change_msgs.push(format!(
+                                "{} {}",
                                 "×".red(),
                                 format!("QGIS plugin NOT installed: {}.", e).to_string()
                             ));
-                            plugin_change_msgs.push(format!("{} {}",
+                            plugin_change_msgs.push(format!(
+                                "{} {}",
                                 "×".red(),
                                 "Tool not registered. YAML reverted.".to_string()
                             ));
@@ -848,23 +925,27 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                     res_qgis = false;
                     set_plugin_flag_in_yaml(&mut yaml_content, "qgis", false)?;
                     yaml_dirty = true;
-                    plugin_change_msgs.push(format!("{} {}",
+                    plugin_change_msgs.push(format!(
+                        "{} {}",
                         "×".red(),
                         "QGIS plugin NOT installed. Tool not registered.".to_string()
                     ));
-                    plugin_change_msgs.push(format!("{} {}",
+                    plugin_change_msgs.push(format!(
+                        "{} {}",
                         "×".red(),
                         "Tool not registered. YAML reverted.".to_string()
                     ));
-                },
+                }
             }
         } else if cur_qgis && verify_qgis_plugin_installed()? {
-            plugin_change_msgs.push(format!("{} {}",
+            plugin_change_msgs.push(format!(
+                "{} {}",
                 "✓".green(),
                 format!("Tool {} in QGIS plugin.", "registered".green())
             ));
         } else if !cur_qgis && verify_qgis_plugin_installed()? {
-            plugin_change_msgs.push(format!("{} {}",
+            plugin_change_msgs.push(format!(
+                "{} {}",
                 "✓".green(),
                 format!("Tool {} from QGIS plugin.", "de-registered".red())
             ));
@@ -913,12 +994,19 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         None => None,
     };
 
-    let script = Some(config
-        .command
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No command specified in geoengine.yaml of worker '{}'", worker_name))?
-        .script
-        .clone());
+    let script = Some(
+        config
+            .command
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No command specified in geoengine.yaml of worker '{}'",
+                    worker_name
+                )
+            })?
+            .script
+            .clone(),
+    );
     let built_at = prev_state.as_ref().and_then(|s| s.built_at.clone());
     let new_state = WorkerState {
         worker_name: worker_name.clone(),
@@ -939,7 +1027,11 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
     // 7. Touch QGIS refresh trigger so the plugin auto-reloads tools
     touch_qgis_refresh_trigger();
 
-    println!("{} Apply complete for worker '{}'", "✓".green().bold(), worker_name.cyan());
+    println!(
+        "{} Apply complete for worker '{}'",
+        "✓".green().bold(),
+        worker_name.cyan()
+    );
     Ok(())
 }
 
@@ -970,9 +1062,7 @@ pub async fn delete_worker(name: Option<&str>) -> Result<()> {
             "!".yellow().bold(),
             worker_path.display()
         );
-        println!(
-            "  The directory may have been moved or deleted.",
-        );
+        println!("  The directory may have been moved or deleted.",);
     }
 
     // Remove from settings
@@ -1046,7 +1136,12 @@ pub async fn run_worker(
                 .map(|d| {
                     (
                         d.name.clone(),
-                        (d.param_type.to_ascii_lowercase(), d.readonly.unwrap_or(true), d.required.unwrap_or(true), d.filetypes.clone()),
+                        (
+                            d.param_type.to_ascii_lowercase(),
+                            d.readonly.unwrap_or(true),
+                            d.required.unwrap_or(true),
+                            d.filetypes.clone(),
+                        ),
                     )
                 })
                 .collect()
@@ -1062,7 +1157,9 @@ pub async fn run_worker(
         });
         // Only auto-mount for declared file/folder inputs.
         // Ignore optional fields left blank.
-        let processed_value = if let Some((param_type, readonly, required, filetypes)) = input_definitions.get(key) {
+        let processed_value = if let Some((param_type, readonly, required, filetypes)) =
+            input_definitions.get(key)
+        {
             match param_type.as_str() {
                 "file" => {
                     // Check if path given is empty, and enforce if it is a required input.
@@ -1076,9 +1173,7 @@ pub async fn run_worker(
                                 key,
                                 value
                             ),
-                            false => {
-                                continue
-                            },
+                            false => continue,
                         }
                     } else if !path.exists() {
                         match readonly {
@@ -1115,16 +1210,17 @@ pub async fn run_worker(
                     // None or [".*"] means all types are accepted.
                     if *readonly {
                         if let Some(accepted) = filetypes {
-                            let accepts_all = accepted.is_empty()
-                                || accepted.iter().any(|ft| ft == ".*");
+                            let accepts_all =
+                                accepted.is_empty() || accepted.iter().any(|ft| ft == ".*");
                             if !accepts_all {
                                 let ext = path
                                     .extension()
-                                    .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
+                                    .map(|e| {
+                                        format!(".{}", e.to_string_lossy().to_ascii_lowercase())
+                                    })
                                     .unwrap_or_default();
-                                let matched = accepted.iter().any(|ft| {
-                                    ft.to_ascii_lowercase() == ext
-                                });
+                                let matched =
+                                    accepted.iter().any(|ft| ft.to_ascii_lowercase() == ext);
                                 if !matched {
                                     anyhow::bail!(
                                         "Input '{}': file '{}' has extension '{}' but only {:?} are accepted",
@@ -1149,9 +1245,9 @@ pub async fn run_worker(
                     if *readonly {
                         // Readonly file input example: `--mask /data/masks/roi.tif` (must exist).
                         // Readonly: bind-mount the file directly (it must exist).
-                        let abs_path = path
-                            .canonicalize()
-                            .with_context(|| format!("Failed to resolve input file path: {}", value))?;
+                        let abs_path = path.canonicalize().with_context(|| {
+                            format!("Failed to resolve input file path: {}", value)
+                        })?;
                         readonly_input_files.push(abs_path.clone());
                         extra_mounts.push((
                             abs_path.to_string_lossy().to_string(),
@@ -1164,18 +1260,17 @@ pub async fn run_worker(
                         // /inputs/<key>/ exists as a real directory. Mounting a single file
                         // into a non-existent container directory causes EACCES/ENOENT on write.
                         let parent = path.parent().ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Input '{}' has no parent directory: {}",
-                                key,
-                                value
+                            anyhow::anyhow!("Input '{}' has no parent directory: {}", key, value)
+                        })?;
+                        let abs_parent = parent.canonicalize().with_context(|| {
+                            format!(
+                                "Failed to resolve parent directory for input '{}': {}",
+                                key, value
                             )
                         })?;
-                        let abs_parent = parent
-                            .canonicalize()
-                            .with_context(|| format!("Failed to resolve parent directory for input '{}': {}", key, value))?;
-                        let abs_file = path
-                            .canonicalize()
-                            .with_context(|| format!("Failed to resolve writable file input '{}': {}", key, value))?;
+                        let abs_file = path.canonicalize().with_context(|| {
+                            format!("Failed to resolve writable file input '{}': {}", key, value)
+                        })?;
                         writable_file_input_targets.push(abs_file);
                         let container_dir = format!("/inputs/{}", key);
                         extra_mounts.push((
@@ -1199,9 +1294,7 @@ pub async fn run_worker(
                                 key,
                                 value
                             ),
-                            false => {
-                                continue
-                            },
+                            false => continue,
                         }
                     } else if !path.exists() {
                         // If readonly, require the folder to exist (e.g., `/data/input`).
@@ -1228,9 +1321,9 @@ pub async fn run_worker(
                         );
                     }
 
-                    let abs_path = path
-                        .canonicalize()
-                        .with_context(|| format!("Failed to resolve input directory path: {}", value))?;
+                    let abs_path = path.canonicalize().with_context(|| {
+                        format!("Failed to resolve input directory path: {}", value)
+                    })?;
                     let container_path = format!("/mnt/input_{}", key);
                     extra_mounts.push((
                         abs_path.to_string_lossy().to_string(),
@@ -1247,13 +1340,11 @@ pub async fn run_worker(
                                 key,
                                 value
                             ),
-                            false => {
-                                continue
-                            },
+                            false => continue,
                         }
                     }
                     value.clone()
-                },
+                }
             }
         } else {
             value.clone()
@@ -1301,7 +1392,12 @@ pub async fn run_worker(
         format!("{} {}", cmd_config.program, cmd_config.script)
     } else {
         let escaped_args: Vec<String> = script_args.iter().map(|a| shell_escape(a)).collect();
-        format!("{} {} {}", cmd_config.program, cmd_config.script, escaped_args.join(" "))
+        format!(
+            "{} {} {}",
+            cmd_config.program,
+            cmd_config.script,
+            escaped_args.join(" ")
+        )
     };
 
     // Auto-detect system GPUs — only keep configs that Docker can use (NVIDIA).
@@ -1361,7 +1457,9 @@ pub async fn run_worker(
     }
     let client = client.as_ref().expect("Docker client must be initialized");
     let exit_code = if json_output {
-        client.run_container_attached_to_stderr(&container_config).await?
+        client
+            .run_container_attached_to_stderr(&container_config)
+            .await?
     } else {
         client.run_container_attached(&container_config).await?
     };
@@ -1385,7 +1483,11 @@ pub async fn run_worker(
         let mut merged: Vec<OutputFileInfo> = by_path.into_values().collect();
         merged.sort_by(|a, b| a.path.cmp(&b.path));
         let result = RunResult {
-            status: if exit_code == 0 { "completed".to_string() } else { "failed".to_string() },
+            status: if exit_code == 0 {
+                "completed".to_string()
+            } else {
+                "failed".to_string()
+            },
             exit_code,
             error: if exit_code != 0 {
                 Some(format!("Container exited with code {}", exit_code))
@@ -1415,19 +1517,24 @@ pub async fn run_worker(
 pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
     let (worker_name, _worker_path) = resolve_worker(worker)?;
     let config = yaml_store::load_saved_config(&worker_name)?;
-    let inputs = config.command.as_ref()
+    let inputs = config
+        .command
+        .as_ref()
         .and_then(|c| c.inputs.as_ref())
         .map(|inputs| {
-            inputs.iter().map(|i| InputDescriptionJson {
-                name: i.name.clone(),
-                param_type: i.param_type.clone(),
-                required: i.required.unwrap_or(true),
-                readonly: i.readonly,
-                default: i.default.clone(),
-                description: i.description.clone(),
-                enum_values: i.enum_values.clone(),
-                filetypes: i.filetypes.clone(),
-            }).collect()
+            inputs
+                .iter()
+                .map(|i| InputDescriptionJson {
+                    name: i.name.clone(),
+                    param_type: i.param_type.clone(),
+                    required: i.required.unwrap_or(true),
+                    readonly: i.readonly,
+                    default: i.default.clone(),
+                    description: i.description.clone(),
+                    enum_values: i.enum_values.clone(),
+                    filetypes: i.filetypes.clone(),
+                })
+                .collect()
         })
         .unwrap_or_default();
 
@@ -1440,8 +1547,12 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
         .map(|version| version.strip_prefix('v').unwrap_or(version).to_string());
     let applied_at = worker_state.as_ref().map(|s| s.applied_at.clone());
     let built_at = worker_state.as_ref().and_then(|s| s.built_at.clone());
-    let yaml_hash = worker_state.as_ref().and_then(|s| s.yaml_hash.as_ref().map(|h| short_hash(h)));
-    let script_hash = worker_state.as_ref().and_then(|s| s.command_hash.as_ref().map(|h| short_hash(h)));
+    let yaml_hash = worker_state
+        .as_ref()
+        .and_then(|s| s.yaml_hash.as_ref().map(|h| short_hash(h)));
+    let script_hash = worker_state
+        .as_ref()
+        .and_then(|s| s.command_hash.as_ref().map(|h| short_hash(h)));
 
     let desc = WorkerDescription {
         name: config.name.clone(),
@@ -1457,106 +1568,138 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
 
     if json {
         println!("{}", serde_json::to_string(&desc)?);
-    }
-    else {
+    } else {
         println!();
         println!("{:<13}: {}", "WORKER".bold(), desc.name);
-        println!("{:<13}: {}", "DESCRIPTION".bold(), match desc.description {
-            Some(d) => d.normal(),
-            None => "No description provided.".italic(),
-        });
+        println!(
+            "{:<13}: {}",
+            "DESCRIPTION".bold(),
+            match desc.description {
+                Some(d) => d.normal(),
+                None => "No description provided.".italic(),
+            }
+        );
         match desc.version {
             Some(v) => {
-                println!("{:<13}: {} {}", "VERSION".bold(), v,
-                         if validate_version(&v).is_ok() { "".normal() } else { "✗".red() });
+                println!(
+                    "{:<13}: {} {}",
+                    "VERSION".bold(),
+                    v,
+                    if validate_version(&v).is_ok() {
+                        "".normal()
+                    } else {
+                        "✗".red()
+                    }
+                );
                 let built_ver = desc.version_built;
                 if built_ver.is_none() {
                     match validate_version(&v) {
                         Ok(_) => {
-                            println!("{:<13}: {} {}",
-                                     "IMAGE VERSION".bold(),
-                                     "not built",
-                                     "↻".yellow()
+                            println!(
+                                "{:<13}: {} {}",
+                                "IMAGE VERSION".bold(),
+                                "not built",
+                                "↻".yellow()
                             );
-                            println!("{}{}",
-                                     " ".repeat(15),
-                                     "Run `geoengine build` to build pushable image.".italic().yellow()
-                            );
-                        },
-                        Err(e) => {
-                            println!("{:<13}: {}",
-                                     "IMAGE VERSION".bold(),
-                                     "not built"
-                            );
-                            println!("{}{}",
-                                     " ".repeat(15),
-                                     e.italic().red()
+                            println!(
+                                "{}{}",
+                                " ".repeat(15),
+                                "Run `geoengine build` to build pushable image."
+                                    .italic()
+                                    .yellow()
                             );
                         }
+                        Err(e) => {
+                            println!("{:<13}: {}", "IMAGE VERSION".bold(), "not built");
+                            println!("{}{}", " ".repeat(15), e.italic().red());
+                        }
                     }
-                }
-                else {
-                    let version_cmp = compare_versions(&config.version.clone(), built_ver.clone().unwrap().as_ref());
+                } else {
+                    let version_cmp = compare_versions(
+                        &config.version.clone(),
+                        built_ver.clone().unwrap().as_ref(),
+                    );
                     match version_cmp {
-                        Ok(order) => match order {
-                            Ordering::Equal => {
-                                println!("{:<13}: {} {}",
-                                         "IMAGE VERSION".bold(),
-                                         built_ver.unwrap(),
-                                         "✓".green()
-                                );
-                            },
-                            Ordering::Greater => {
-                                println!("{:<13}: {} {}",
-                                         "IMAGE VERSION".bold(),
-                                         built_ver.unwrap(),
-                                         "↻".yellow()
-                                );
-                                println!("{}{}",
+                        Ok(order) => {
+                            match order {
+                                Ordering::Equal => {
+                                    println!(
+                                        "{:<13}: {} {}",
+                                        "IMAGE VERSION".bold(),
+                                        built_ver.unwrap(),
+                                        "✓".green()
+                                    );
+                                }
+                                Ordering::Greater => {
+                                    println!(
+                                        "{:<13}: {} {}",
+                                        "IMAGE VERSION".bold(),
+                                        built_ver.unwrap(),
+                                        "↻".yellow()
+                                    );
+                                    println!("{}{}",
                                          " ".repeat(15),
                                          "New version available. Run `geoengine build` to update image.".italic().yellow()
                                 );
+                                }
+                                Ordering::Less => {
+                                    println!(
+                                        "{:<13}: {} {}",
+                                        "IMAGE VERSION".bold(),
+                                        built_ver.unwrap(),
+                                        "✗".red()
+                                    );
+                                    println!(
+                                        "{}{}",
+                                        " ".repeat(15),
+                                        "Please ensure your versions are incremental."
+                                            .italic()
+                                            .red()
+                                    );
+                                }
                             }
-                            Ordering::Less => {
-                                println!("{:<13}: {} {}",
-                                         "IMAGE VERSION".bold(),
-                                         built_ver.unwrap(),
-                                         "✗".red()
-                                );
-                                println!("{}{}",
-                                         " ".repeat(15),
-                                         "Please ensure your versions are incremental.".italic().red()
-                                );
-                            }
-                        },
+                        }
                         Err(e) => {
-                            println!("{:<13}: {}",
-                                     "IMAGE VERSION".bold(),
-                                     built_ver.unwrap(),
-                            );
-                            println!("{}{}",
-                                     " ".repeat(15),
-                                     e.italic().red()
-                            );
+                            println!("{:<13}: {}", "IMAGE VERSION".bold(), built_ver.unwrap(),);
+                            println!("{}{}", " ".repeat(15), e.italic().red());
                         }
                     }
                 }
-            },
-            None => println!("{}: {}",
+            }
+            None => println!(
+                "{}: {}",
                 "VERSION".bold(),
-                "No version specified. Please specify a version before the next build.".italic().red()
-            )
+                "No version specified. Please specify a version before the next build."
+                    .italic()
+                    .red()
+            ),
         };
         // Compute column widths dynamically
-        let name_w = desc.inputs.iter().map(|t| t.name.len()).max().unwrap_or(4).max(4);
-        let type_w = desc.inputs.iter().map(|t| t.param_type.len()).max().unwrap_or(4).max(4);
+        let name_w = desc
+            .inputs
+            .iter()
+            .map(|t| t.name.len())
+            .max()
+            .unwrap_or(4)
+            .max(4);
+        let type_w = desc
+            .inputs
+            .iter()
+            .map(|t| t.param_type.len())
+            .max()
+            .unwrap_or(4)
+            .max(4);
         let req_w = 8; // "Required"
-        let desc_w = desc.inputs.iter()
+        let desc_w = desc
+            .inputs
+            .iter()
             .map(|t| t.description.as_deref().unwrap_or("").len())
             .max()
             .unwrap_or(11)
             .max(11);
-        let def_w = desc.inputs.iter()
+        let def_w = desc
+            .inputs
+            .iter()
             .map(|t| {
                 let default = t.default.clone().unwrap_or(serde_yaml::Value::from(""));
                 yaml_value_to_display_string(&default).len()
@@ -1564,7 +1707,9 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
             .max()
             .unwrap_or(7)
             .max(7);
-        let enum_w = desc.inputs.iter()
+        let enum_w = desc
+            .inputs
+            .iter()
             .map(|t| {
                 t.enum_values
                     .as_ref()
@@ -1575,10 +1720,12 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
             .unwrap_or(5)
             .max(5);
         // Print header
-        let total_width =
-            name_w + type_w + req_w + desc_w + def_w + enum_w
-                + (5 * 3); // 5 separators " | "
-        println!("{:^total_width$}", "INPUTS".bold(), total_width = total_width);
+        let total_width = name_w + type_w + req_w + desc_w + def_w + enum_w + (5 * 3); // 5 separators " | "
+        println!(
+            "{:^total_width$}",
+            "INPUTS".bold(),
+            total_width = total_width
+        );
         println!("{}", "=".repeat(total_width));
         println!(
             "{:<name_w$} | {:<type_w$} | {:<req_w$} | {:<desc_w$} | {:<def_w$} | {:<enum_w$}",
@@ -1645,15 +1792,13 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
     let settings = Settings::load()?;
     let workers = settings.list_workers();
     let choice = match gis {
-        Some(g) => {
-            match g.as_str() {
-                "arcgis" => 1,
-                "qgis" => 2,
-                _ => {
-                    anyhow::bail!("Invalid --gis listed: '{}'", g);
-                },
+        Some(g) => match g.as_str() {
+            "arcgis" => 1,
+            "qgis" => 2,
+            _ => {
+                anyhow::bail!("Invalid --gis listed: '{}'", g);
             }
-        }
+        },
         None => 0,
     };
 
@@ -1664,17 +1809,32 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
                 Ok(config) => {
                     let is_registered = match choice {
                         0 => None,
-                        1 => Some(config.plugins.as_ref().and_then(|p| p.arcgis).unwrap_or(false)),
-                        2 => Some(config.plugins.as_ref().and_then(|p| p.qgis).unwrap_or(false)),
+                        1 => Some(
+                            config
+                                .plugins
+                                .as_ref()
+                                .and_then(|p| p.arcgis)
+                                .unwrap_or(false),
+                        ),
+                        2 => Some(
+                            config
+                                .plugins
+                                .as_ref()
+                                .and_then(|p| p.qgis)
+                                .unwrap_or(false),
+                        ),
                         _ => unreachable!(),
                     };
                     (config.command.is_some(), config.description, is_registered)
-                },
+                }
                 Err(_) => (false, None, if choice == 0 { None } else { Some(false) }),
             };
             match is_registered {
                 Some(t) => {
-                    if !t { continue } else {}
+                    if !t {
+                        continue;
+                    } else {
+                    }
                 }
                 None => {}
             }
@@ -1692,17 +1852,23 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
 
     if workers.is_empty() {
         println!("{}", "No workers registered".yellow());
-        println!(
-            "\nRegister a worker with: {}",
-            "geoengine apply".cyan()
-        );
+        println!("\nRegister a worker with: {}", "geoengine apply".cyan());
         return Ok(());
     }
 
     // 3 extra for tick/cross icon + space + separator
-    let name_w = workers.iter().map(|(n, _)| n.len() + 3).max().unwrap_or(5).max(7);
+    let name_w = workers
+        .iter()
+        .map(|(n, _)| n.len() + 3)
+        .max()
+        .unwrap_or(5)
+        .max(7);
     let found_w = 5; // "FOUND"
-    let path_w = workers.iter().map(|(_, p)| p.display().to_string().len()).max().unwrap_or(4);
+    let path_w = workers
+        .iter()
+        .map(|(_, p)| p.display().to_string().len())
+        .max()
+        .unwrap_or(4);
 
     println!();
     println!(
@@ -1727,7 +1893,14 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
         } else {
             "✗".red()
         };
-        println!("{} {:<name_w$} {}       {}", applied, name, found, path.display(), name_w = name_w - 2);
+        println!(
+            "{} {:<name_w$} {}       {}",
+            applied,
+            name,
+            found,
+            path.display(),
+            name_w = name_w - 2
+        );
     }
     println!();
 
@@ -1867,20 +2040,14 @@ pub async fn diff_worker(target: Option<&str>) -> Result<()> {
                 entry.label.cyan(),
                 "changed".red()
             );
-            println!(
-                "      old: {}",
-                short_hash(&entry.old_hash).dimmed()
-            );
-            println!(
-                "      new: {}",
-                short_hash(&entry.new_hash).yellow()
-            );
+            println!("      old: {}", short_hash(&entry.old_hash).dimmed());
+            println!("      new: {}", short_hash(&entry.new_hash).yellow());
             println!(
                 "      {} {}{}",
                 "Run 'geoengine".yellow().italic(),
                 match entry.label.as_str() {
                     "geoengine.yaml" => "apply".yellow().italic().bold(),
-                    _ => "build".yellow().italic().bold()
+                    _ => "build".yellow().italic().bold(),
                 },
                 "' to update.".yellow().italic()
             );
@@ -1896,15 +2063,9 @@ pub async fn diff_worker(target: Option<&str>) -> Result<()> {
 
     println!("{}", "─".repeat(60));
     if any_changed {
-        println!(
-            "{} Changes detected",
-            "!".yellow().bold()
-        );
+        println!("{} Changes detected", "!".yellow().bold());
     } else {
-        println!(
-            "{} Everything is up to date.",
-            "✓".green().bold()
-        );
+        println!("{} Everything is up to date.", "✓".green().bold());
     }
     println!();
 
@@ -1933,13 +2094,22 @@ fn resolve_worker_from_cwd() -> (String, PathBuf) {
     match settings.find_worker_by_path(&cwd) {
         Some((name, path)) => (name, path),
         None => {
-            eprintln!("{} Could not find a registered worker for the current directory:", "Error:".red().bold());
+            eprintln!(
+                "{} Could not find a registered worker for the current directory:",
+                "Error:".red().bold()
+            );
             eprintln!("  {}", cwd.display());
             eprintln!();
             eprintln!("Please check the following:");
             eprintln!("  1. You are in the correct worker directory.");
-            eprintln!("  2. The worker has been registered (run {} to see registered workers).", "geoengine workers".cyan());
-            eprintln!("  3. If you moved the worker directory, run {} to re-register it.", "geoengine apply".cyan());
+            eprintln!(
+                "  2. The worker has been registered (run {} to see registered workers).",
+                "geoengine workers".cyan()
+            );
+            eprintln!(
+                "  3. If you moved the worker directory, run {} to re-register it.",
+                "geoengine apply".cyan()
+            );
             std::process::exit(1);
         }
     }
@@ -1952,7 +2122,10 @@ fn resolve_worker(worker: Option<&str>) -> Result<(String, PathBuf)> {
         match settings.get_worker_path(name) {
             Ok(path) => Ok((name.to_string(), path)),
             Err(_) => {
-                anyhow::bail!("Worker '{}' not found. Run 'geoengine apply' to register it.", name)
+                anyhow::bail!(
+                    "Worker '{}' not found. Run 'geoengine apply' to register it.",
+                    name
+                )
             }
         }
     } else {
@@ -1971,7 +2144,11 @@ fn touch_qgis_refresh_trigger() {
     }
 }
 
-fn set_plugin_flag_in_yaml(yaml_content: &mut String, plugin_key: &str, enabled: bool) -> Result<()> {
+fn set_plugin_flag_in_yaml(
+    yaml_content: &mut String,
+    plugin_key: &str,
+    enabled: bool,
+) -> Result<()> {
     let mut yaml_value: serde_yaml::Value = serde_yaml::from_str(yaml_content)
         .context("Failed to parse geoengine.yaml while updating plugin status")?;
 
@@ -2076,6 +2253,9 @@ fn verify_worker_config_path_types(config: &WorkerConfig, worker_path: &Path) ->
     if errors.is_empty() {
         Ok(())
     } else {
-        anyhow::bail!("geoengine.yaml path validation failed:\n{}", errors.join("\n"))
+        anyhow::bail!(
+            "geoengine.yaml path validation failed:\n{}",
+            errors.join("\n")
+        )
     }
 }

@@ -3,8 +3,8 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Initialize the logging system
 pub fn init() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("geoengine=info,warn"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("geoengine=info,warn"));
 
     tracing_subscriber::registry()
         .with(filter)
@@ -20,4 +20,3 @@ pub fn init() -> Result<()> {
 
     Ok(())
 }
-

@@ -29,17 +29,20 @@ fn generate_dockerfile_runtime(dockerfile: &mut File) -> anyhow::Result<()> {
     dockerfile.write_all(b"FROM ubuntu:24.04 AS final\n\n")?;
 
     // Install minimal runtime dependencies
-    dockerfile.write_all(b"RUN apt-get update && apt-get install -y --no-install-recommends \\\n")?;
+    dockerfile
+        .write_all(b"RUN apt-get update && apt-get install -y --no-install-recommends \\\n")?;
     dockerfile.write_all(b"\tca-certificates \\\n")?;
     dockerfile.write_all(b"\tcurl \\\n")?;
     dockerfile.write_all(b"\tgit \\\n")?;
     dockerfile.write_all(b"\t&& rm -rf /var/lib/apt/lists/*\n\n")?;
 
     // Copy pixi binary and base environment from build stage
-    dockerfile.write_all(b"COPY --from=build /pixi/.pixi/envs/default /pixi/.pixi/envs/default\n")?;
-    dockerfile.write_all(b"COPY --from=build --chmod=0755 /pixi/entrypoint.sh /pixi/entrypoint.sh\n")?;
+    dockerfile
+        .write_all(b"COPY --from=build /pixi/.pixi/envs/default /pixi/.pixi/envs/default\n")?;
+    dockerfile
+        .write_all(b"COPY --from=build --chmod=0755 /pixi/entrypoint.sh /pixi/entrypoint.sh\n")?;
     dockerfile.write_all(b"COPY --from=build /pixi/pixi.toml /pixi/pixi.toml\n\n")?;
-    
+
     // Copy project tree into isolated folder in container, set its working directory
     dockerfile.write_all(b"WORKDIR /app\n\n")?;
     dockerfile.write_all(b"COPY . /app\n\n")?;
@@ -70,7 +73,7 @@ fn generate_dockerignore(ignorefile: &mut File) -> anyhow::Result<()> {
         "__pycache__",
         "*.pyc",
         "*.pyo",
-        ".pytest_cache"
+        ".pytest_cache",
     ];
     for ignorable in ignorables.iter() {
         ignorefile.write_all(format!("{ignorable}\n").as_bytes())?;

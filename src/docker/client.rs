@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use bollard::container::{Config, CreateContainerOptions, LogsOptions, StartContainerOptions, WaitContainerOptions};
+use bollard::container::{
+    Config, CreateContainerOptions, LogsOptions, StartContainerOptions, WaitContainerOptions,
+};
 use bollard::image::{CreateImageOptions, ImportImageOptions, TagImageOptions};
 use bollard::Docker;
 use futures::StreamExt;
@@ -109,7 +111,9 @@ impl DockerClient {
     }
 
     fn is_permission_denied(err: &anyhow::Error) -> bool {
-        format!("{:#}", err).to_lowercase().contains("permission denied")
+        format!("{:#}", err)
+            .to_lowercase()
+            .contains("permission denied")
     }
 
     async fn try_start_docker_daemon() -> Result<()> {
@@ -198,7 +202,9 @@ impl DockerClient {
             ..Default::default()
         };
 
-        let mut stream = self.docker.import_image(options, file_contents.into(), None);
+        let mut stream = self
+            .docker
+            .import_image(options, file_contents.into(), None);
 
         let mut image_id = String::new();
         while let Some(result) = stream.next().await {
@@ -237,13 +243,13 @@ impl DockerClient {
         let mut result: Vec<ImageInfo> = images
             .into_iter()
             .filter(|img| {
-               img.repo_tags.iter().any(|t| t.starts_with("geoengine-local"))
+                img.repo_tags
+                    .iter()
+                    .any(|t| t.starts_with("geoengine-local"))
             })
             .filter(|img| {
                 if let Some(f) = filter {
-                    img.repo_tags
-                        .iter()
-                        .any(|t| t.contains(f))
+                    img.repo_tags.iter().any(|t| t.contains(f))
                 } else {
                     true
                 }
@@ -445,7 +451,8 @@ impl DockerClient {
                 drop(step_sender);
 
                 let truncated = raw.len() > MAX_STDERR_BYTES;
-                let mut s = String::from_utf8_lossy(&raw[..raw.len().min(MAX_STDERR_BYTES)]).into_owned();
+                let mut s =
+                    String::from_utf8_lossy(&raw[..raw.len().min(MAX_STDERR_BYTES)]).into_owned();
                 if truncated {
                     s.push_str("\n...(truncated)");
                 }
@@ -457,13 +464,19 @@ impl DockerClient {
             String::new()
         };
 
-        let status = child.wait().await.context("`docker build` process failed")?;
+        let status = child
+            .wait()
+            .await
+            .context("`docker build` process failed")?;
 
         if !status.success() {
             if verbose {
                 anyhow::bail!("Build failed (exit code {:?}).", status.code());
             } else if stderr_output.is_empty() {
-                anyhow::bail!("Build failed (exit code {:?}). Re-run with --verbose for details.", status.code());
+                anyhow::bail!(
+                    "Build failed (exit code {:?}). Re-run with --verbose for details.",
+                    status.code()
+                );
             } else {
                 anyhow::bail!("Build failed:\n{}", stderr_output.trim());
             }
@@ -545,7 +558,9 @@ impl DockerClient {
                 condition: "not-running",
             };
 
-            let mut wait_stream = self.docker.wait_container(&container_id, Some(wait_options));
+            let mut wait_stream = self
+                .docker
+                .wait_container(&container_id, Some(wait_options));
             let wait_result = tokio::select! {
                 signal = &mut shutdown_signal => {
                     cancel_reason = Some(signal?);
@@ -594,8 +609,8 @@ impl DockerClient {
     #[cfg(unix)]
     async fn wait_for_shutdown_signal() -> Result<&'static str> {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate())
-            .context("Failed to subscribe to SIGTERM")?;
+        let mut sigterm =
+            signal(SignalKind::terminate()).context("Failed to subscribe to SIGTERM")?;
         tokio::select! {
             res = tokio::signal::ctrl_c() => {
                 res.context("Failed while waiting for Ctrl-C")?;
@@ -621,8 +636,7 @@ impl DockerClient {
     ) -> Result<()> {
         eprintln!(
             "Cancellation signal ({}) received. Stopping container {}...",
-            reason,
-            container_id
+            reason, container_id
         );
 
         let mut errors: Vec<String> = Vec::new();
@@ -647,9 +661,15 @@ impl DockerClient {
 
         if errors.is_empty() {
             if remove_on_exit {
-                eprintln!("Container {} stopped and removed after cancellation.", container_id);
+                eprintln!(
+                    "Container {} stopped and removed after cancellation.",
+                    container_id
+                );
             } else {
-                eprintln!("Container {} stopped (not removed) after cancellation.", container_id);
+                eprintln!(
+                    "Container {} stopped (not removed) after cancellation.",
+                    container_id
+                );
             }
             Ok(())
         } else {
@@ -803,9 +823,7 @@ impl DockerClient {
 
     /// Stop a running container
     pub async fn stop_container(&self, container_id: &str) -> Result<()> {
-        self.docker
-            .stop_container(container_id, None)
-            .await?;
+        self.docker.stop_container(container_id, None).await?;
         Ok(())
     }
 
@@ -815,7 +833,9 @@ impl DockerClient {
             force,
             ..Default::default()
         };
-        self.docker.remove_container(container_id, Some(options)).await?;
+        self.docker
+            .remove_container(container_id, Some(options))
+            .await?;
         Ok(())
     }
 }
