@@ -47,17 +47,21 @@ pub fn compare_versions(v1: &str, v2: &str) -> Result<Ordering, String> {
     validate_version(v2)?;
     let ver1 = match Version::parse(v1) {
         Ok(v) => v,
-        Err(_) => return Err(format!(
+        Err(_) => {
+            return Err(format!(
             "Invalid version '{}'. Please ensure your version number follows 'MAJOR.MINOR.PATCH'.",
             v1
-        )),
+        ))
+        }
     };
     let ver2 = match Version::parse(v2) {
         Ok(v) => v,
-        Err(_) => return Err(format!(
+        Err(_) => {
+            return Err(format!(
             "Invalid version '{}'. Please ensure your version number follows 'MAJOR.MINOR.PATCH'.",
             v2
-        )),
+        ))
+        }
     };
     Ok(ver1.cmp(&ver2))
 }

@@ -67,7 +67,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          cp ${{ github.workspace }}/install/install.sh .
+          cp "${{ github.workspace }}/install/install.sh" .
           tar -czvf ../../../${{ matrix.name }}.tar.gz geoengine install.sh
           cd ../../..
 
@@ -110,19 +110,27 @@ jobs:
         run: find artifacts -type f
 
       - name: Generate checksums
+        shell: bash
         run: |
+          set -euo pipefail
+          shopt -s nullglob
           # Run sha256sum inside each artifact subdirectory so the output
           # contains only the bare filename with no leading path components.
           # Explicitly match only .tar.gz and .zip to avoid hashing unexpected files.
-          > checksums.txt
+          : > checksums.txt
           for dir in artifacts/*/; do
             (
               cd "$dir"
-              for f in *.tar.gz *.zip; do
-                [ -f "$f" ] && sha256sum "$f"
-              done
+              files=( *.tar.gz *.zip )
+              if (( ${#files[@]} > 0 )); then
+                sha256sum "${files[@]}"
+              fi
             ) >> checksums.txt
           done
+          if [[ ! -s checksums.txt ]]; then
+            echo "ERROR: checksums.txt is empty; no release archives were found" >&2
+            exit 1
+          fi
           sort -k2 checksums.txt -o checksums.txt
           cat checksums.txt
 
