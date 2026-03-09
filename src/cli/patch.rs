@@ -10,6 +10,8 @@ use crate::config::yaml_store;
 use crate::docker::{dockerfile};
 use crate::utils::paths;
 
+use sha2::{Digest, Sha256};
+
 /// Validate all GeoEngine artifacts and regenerate stale Dockerfiles and GIS plugins.
 ///
 /// Global artifacts checked:
@@ -48,7 +50,7 @@ pub async fn patch_all() -> Result<()> {
             println!("  {} {}", "✗".red().bold(), msg);
             issues.push(msg);
             // Cannot continue without settings — report and exit
-            print_summary(workers_checked, dockerfiles_updated, 0, &issues);
+            print_summary(workers_checked, dockerfiles_updated, 0, 0, &issues);
             std::process::exit(1);
         }
     };
@@ -312,7 +314,7 @@ pub async fn patch_all() -> Result<()> {
     // 6. Summary
     // -----------------------------------------------------------------------
     println!();
-    print_summary(workers_checked, dockerfiles_updated, plugins_updated, &issues);
+    print_summary(workers_checked, dockerfiles_updated, plugins_updated, 0, &issues);
 
     if !issues.is_empty() {
         std::process::exit(1);
@@ -325,11 +327,12 @@ fn print_summary(
     workers_checked: usize,
     dockerfiles_updated: usize,
     plugins_updated: usize,
+    skills_updated: usize,
     issues: &[String],
 ) {
     let issue_count = issues.len();
     println!(
-        "{} {} worker{} checked, {} Dockerfile{} updated, {} plugin{} updated, {} issue{} found.",
+        "{} {} worker{} checked, {} Dockerfile{} updated, {} plugin{} updated, {} skill{} synced, {} issue{} found.",
         "Patch complete:".bold(),
         workers_checked,
         if workers_checked == 1 { "" } else { "s" },
@@ -337,9 +340,43 @@ fn print_summary(
         if dockerfiles_updated == 1 { "" } else { "s" },
         plugins_updated,
         if plugins_updated == 1 { "" } else { "s" },
+        skills_updated,
+        if skills_updated == 1 { "" } else { "s" },
         issue_count,
         if issue_count == 1 { "" } else { "s" },
     );
+    if dockerfiles_updated > 0 ||
+        plugins_updated > 0 ||
+        skills_updated > 0 ||
+        issue_count > 0 {
+        println!();
+        println!("{}", "TO-DOs:".bold());
+        if issue_count > 0 {
+            println!("  {} Fix worker issues above.",
+                "✗".red().bold()
+            )
+        }
+        if dockerfiles_updated > 0 {
+            println!("  {} Rebuild worker{} with updated Dockerfile{}.",
+                "!".yellow().bold(),
+                if dockerfiles_updated == 1 { "" } else { "s" },
+                if dockerfiles_updated == 1 { "" } else { "s" },
+            )
+        }
+        if plugins_updated > 0 {
+            println!("  {} Restart updated GIS platform{} to get latest plugin{}.",
+                "!".yellow().bold(),
+                if plugins_updated == 1 { "" } else { "s" },
+                if plugins_updated == 1 { "" } else { "s" },
+            )
+        }
+        if skills_updated > 0 {
+            println!("  {} Restart agents to get latest skill{}",
+                "!".yellow().bold(),
+                if skills_updated == 1 { "" } else { "s" },
+            )
+        }
+    }
 }
 
 use anyhow::anyhow;
@@ -365,6 +402,7 @@ type V2ConfigCheckFn = for<'a> fn(
 type V2WorkerCheckFn =
     for<'a> fn(&'a mut PatchV2Ctx, &'a str, &'a Path) -> BoxFuture<'a, Result<V2WorkerFlow>>;
 type V2PluginCheckFn = for<'a> fn(&'a mut PatchV2Ctx) -> BoxFuture<'a, Result<()>>;
+type V2SkillsCheckFn = for<'a> fn(&'a mut PatchV2Ctx) -> BoxFuture<'a, Result<()>>;
 
 // =================================================================================================
 //                                       STAGE FLOW DEFINITIONS
@@ -394,6 +432,7 @@ struct PatchV2Ctx {
     issues: Vec<String>,
     dockerfiles_updated: usize,
     plugins_updated: usize,
+    skills_updated: usize,
     workers_checked: usize,
     settings: Option<Settings>,
     canonical_dockerfile: String,
@@ -406,6 +445,7 @@ impl PatchV2Ctx {
             issues: Vec::new(),
             dockerfiles_updated: 0,
             plugins_updated: 0,
+            skills_updated: 0,
             workers_checked: 0,
             settings: None,
             canonical_dockerfile: dockerfile::canonical_dockerfile_content(),
@@ -510,6 +550,14 @@ async fn v2_run_plugin_checks(ctx: &mut PatchV2Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Sequential running of skills stage.
+async fn v2_run_skills_checks(ctx: &mut PatchV2Ctx) -> Result<()> {
+    for check in V2_SKILLS_CHECKS {
+        check(ctx).await?;
+    }
+    Ok(())
+}
+
 // =================================================================================================
 //                                 STAGE-WISE FUNCTION SIGNATURE REGISTRY
 // =================================================================================================
@@ -542,8 +590,10 @@ const V2_WORKER_CHECKS: &[V2WorkerCheckFn] = &[
 
 /// Check GIS plugin artifacts.
 const V2_PLUGIN_CHECKS: &[V2PluginCheckFn] = &[v2_patch_qgis_stage, v2_patch_arcgis_stage];
-// Define these above functions below patch_all_v2()
 
+/// Sync agent skills from the GeoEngine skills/ directory.
+const V2_SKILLS_CHECKS: &[V2SkillsCheckFn] = &[v2_patch_claude_skills, v2_patch_codex_skills];
+// Define these above functions below patch_all_v2()
 
 /// v2 pipeline for `geoengine patch` implemented as staged function registries.
 /// Register a function in the respective stage above, then define them below this function.
@@ -622,11 +672,15 @@ pub async fn patch_all_v2() -> Result<()> {
     println!("\n{}", "Checking GIS plugins...".bold());
     v2_run_plugin_checks(&mut ctx).await?;
 
+    println!("\n{}", "Checking agent skills...".bold());
+    v2_run_skills_checks(&mut ctx).await?;
+
     println!();
     print_summary(
         ctx.workers_checked,
         ctx.dockerfiles_updated,
         ctx.plugins_updated,
+        ctx.skills_updated,
         &ctx.issues,
     );
 
@@ -659,7 +713,7 @@ fn v2_load_settings(ctx: &'_ mut PatchV2Ctx) -> BoxFuture<'_, Result<V2PatchFlow
                 let msg = format!("settings.yaml failed to parse: {}", e);
                 println!("  {} {}", "✗".red().bold(), msg);
                 ctx.issues.push(msg);
-                print_summary(ctx.workers_checked, ctx.dockerfiles_updated, 0, &ctx.issues);
+                print_summary(ctx.workers_checked, ctx.dockerfiles_updated, 0, 0, &ctx.issues);
                 std::process::exit(1);
             }
         }
@@ -994,6 +1048,236 @@ fn v2_patch_arcgis_stage(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
             }
             Err(e) => {
                 let msg = format!("ArcGIS plugin check error: {}", e);
+                println!("  {} {}", "✗".red().bold(), msg);
+                ctx.issues.push(msg);
+            }
+        }
+
+        Ok(())
+    })
+}
+
+// -------------------------------------------SKILLS STAGE------------------------------------------
+// Input(s):
+// - ctx (central config)
+// -------------------------------------------------------------------------------------------------
+
+/// Returns a SHA-256 hex digest of a file's contents, or `None` if the file cannot be read.
+fn file_sha256(path: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let digest = Sha256::digest(&bytes);
+    Some(format!("{:x}", digest))
+}
+
+/// Syncs all skills from the GeoEngine `skills/` source directory into an agent's skills
+/// directory. Skills are identified by their subdirectory name. Each skill contains a `SKILL.md`
+/// file (and potentially other files in the future). If the agent's skills directory does not
+/// exist, the entire sync is skipped.
+///
+/// For each skill found in the source:
+///   - If the skill is absent in the agent dir → copy it in.
+///   - If the skill is present but any file differs (by SHA-256) → overwrite it.
+///   - If the skill is present and identical → skip.
+///
+/// Returns the number of skills that were added or updated.
+fn sync_skills_to_agent(source_skills_dir: &std::path::Path, agent_skills_dir: &std::path::Path) -> Result<usize> {
+    let mut updated = 0usize;
+
+    // Collect skill names from the source directory (each subdirectory is one skill).
+    let skill_dirs: Vec<PathBuf> = std::fs::read_dir(source_skills_dir)?
+        .filter_map(|e| e.ok().map(|d| d.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+
+    for skill_src in skill_dirs {
+        let skill_name = match skill_src.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        // Skip hidden directories (e.g. .system inside Codex skills).
+        if skill_name.starts_with('.') {
+            continue;
+        }
+
+        let skill_dst = agent_skills_dir.join(&skill_name);
+
+        // Collect all files within this skill's source directory.
+        let src_files: Vec<PathBuf> = std::fs::read_dir(&skill_src)?
+            .filter_map(|e| e.ok().map(|d| d.path()))
+            .filter(|p| p.is_file())
+            .collect();
+
+        let mut skill_needs_update = false;
+
+        if !skill_dst.exists() {
+            skill_needs_update = true;
+        } else {
+            for src_file in &src_files {
+                let file_name = match src_file.file_name() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let dst_file = skill_dst.join(file_name);
+
+                let src_hash = file_sha256(src_file);
+                let dst_hash = if dst_file.exists() { file_sha256(&dst_file) } else { None };
+
+                if src_hash != dst_hash {
+                    skill_needs_update = true;
+                    break;
+                }
+            }
+        }
+
+        if skill_needs_update {
+            std::fs::create_dir_all(&skill_dst)?;
+            for src_file in &src_files {
+                if let Some(file_name) = src_file.file_name() {
+                    std::fs::copy(src_file, skill_dst.join(file_name))?;
+                }
+            }
+            updated += 1;
+        }
+    }
+
+    Ok(updated)
+}
+
+/// Resolves the GeoEngine project's own `skills/` directory relative to the binary's location.
+/// Falls back to the current working directory if the binary path cannot be determined.
+fn get_geoengine_skills_dir() -> Result<PathBuf> {
+    // Walk up from the binary location to find the `skills/` directory.
+    // In development the binary sits in `target/debug/` or `target/release/`; in production it
+    // may be installed to `/usr/local/bin` or similar. We therefore also check the directory
+    // that the binary currently lives in and then fall back to the CWD.
+    let candidates: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        if let Ok(exe) = std::env::current_exe() {
+            // e.g. target/debug/geoengine → try ../../skills
+            if let Some(parent) = exe.parent() {
+                v.push(parent.join("skills"));
+                if let Some(grandparent) = parent.parent() {
+                    v.push(grandparent.join("skills"));
+                    if let Some(great) = grandparent.parent() {
+                        v.push(great.join("skills"));
+                    }
+                }
+            }
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            v.push(cwd.join("skills"));
+        }
+        v
+    };
+
+    candidates
+        .into_iter()
+        .find(|p| p.is_dir())
+        .ok_or_else(|| anyhow!("Could not locate the GeoEngine skills/ directory"))
+}
+
+/// Syncs GeoEngine skills into Claude's skills directory (`~/.claude/skills`).
+/// Skipped entirely if `~/.claude` does not exist (Claude not installed).
+fn v2_patch_claude_skills(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
+    Box::pin(async move {
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => {
+                println!("  {} Could not determine home directory — skipping Claude skills", "•".cyan());
+                return Ok(());
+            }
+        };
+
+        let claude_dir = home.join(".claude");
+        if !claude_dir.exists() {
+            println!("  {} Claude not installed on this machine — skipping", "•".cyan());
+            return Ok(());
+        }
+
+        let agent_skills_dir = claude_dir.join("skills");
+        std::fs::create_dir_all(&agent_skills_dir)?;
+
+        let source_skills_dir = match get_geoengine_skills_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                let msg = format!("Could not locate GeoEngine skills/ directory: {}", e);
+                println!("  {} {}", "✗".red().bold(), msg);
+                ctx.issues.push(msg);
+                return Ok(());
+            }
+        };
+
+        match sync_skills_to_agent(&source_skills_dir, &agent_skills_dir) {
+            Ok(0) => {
+                println!("  {} Claude skills up-to-date", "✓".green().bold());
+            }
+            Ok(n) => {
+                ctx.skills_updated += n;
+                println!(
+                    "  {} Claude skills updated ({} skill{} synced)",
+                    "✓".green().bold(),
+                    n,
+                    if n == 1 { "" } else { "s" },
+                );
+            }
+            Err(e) => {
+                let msg = format!("Claude skills sync failed: {}", e);
+                println!("  {} {}", "✗".red().bold(), msg);
+                ctx.issues.push(msg);
+            }
+        }
+
+        Ok(())
+    })
+}
+
+/// Syncs GeoEngine skills into Codex's skills directory (`~/.codex/skills`).
+/// Skipped entirely if `~/.codex` does not exist (Codex not installed).
+fn v2_patch_codex_skills(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
+    Box::pin(async move {
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => {
+                println!("  {} Could not determine home directory — skipping Codex skills", "•".cyan());
+                return Ok(());
+            }
+        };
+
+        let codex_dir = home.join(".codex");
+        if !codex_dir.exists() {
+            println!("  {} Codex not installed on this machine — skipping", "•".cyan());
+            return Ok(());
+        }
+
+        let agent_skills_dir = codex_dir.join("skills");
+        std::fs::create_dir_all(&agent_skills_dir)?;
+
+        let source_skills_dir = match get_geoengine_skills_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                let msg = format!("Could not locate GeoEngine skills/ directory: {}", e);
+                println!("  {} {}", "✗".red().bold(), msg);
+                ctx.issues.push(msg);
+                return Ok(());
+            }
+        };
+
+        match sync_skills_to_agent(&source_skills_dir, &agent_skills_dir) {
+            Ok(0) => {
+                println!("  {} Codex skills up-to-date", "✓".green().bold());
+            }
+            Ok(n) => {
+                ctx.skills_updated += n;
+                println!(
+                    "  {} Codex skills updated ({} skill{} synced)",
+                    "✓".green().bold(),
+                    n,
+                    if n == 1 { "" } else { "s" },
+                );
+            }
+            Err(e) => {
+                let msg = format!("Codex skills sync failed: {}", e);
                 println!("  {} {}", "✗".red().bold(), msg);
                 ctx.issues.push(msg);
             }

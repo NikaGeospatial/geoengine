@@ -8,7 +8,6 @@ description: >
   cloud. This skill routes to the correct sub-skills and CLI commands and
   explains every GeoEngine command with its flags.
 ---
-
 # Use GeoEngine
 
 GeoEngine is a Docker-based isolated runtime manager for geospatial workloads.
@@ -18,7 +17,10 @@ exposes it to GIS plugins (QGIS, ArcGIS) or direct CLI invocation.
 **It is important to note that any time you see an available update for GeoEngine**
 (this appears in the CLI output whenever you run any commands, if there is an update, there
 should be a message that starts with "⚡ Update available:")
-**, prompt the user to update GeoEngine and then run `geoengine patch` before continuing.**
+**, prompt the user to run `geoengine update` before continuing.**
+`geoengine update` handles everything in one step: it upgrades the binary using the original
+install method (Homebrew, curl, or PowerShell) and then automatically runs `geoengine patch`
+to bring all workers, GIS plugins, and agent skills in sync with the new version.
 If the user does not want to update GeoEngine, just proceed with the usage of the local
 version of GeoEngine but remind the user with every prompt that GeoEngine has an update.
 
@@ -34,7 +36,8 @@ Read the user's intent and route to the correct workflow below.
 | Updated their script and want worker artifacts refreshed | [Workflow 2 – Update Worker After Script Changes](#workflow-2--update-worker-after-script-changes) |
 | Want to change something in the main script | [Workflow 3 – Edit Script Then Optionally Update Worker](#workflow-3--edit-script-then-optionally-update-worker) |
 | Run, inspect, diff, delete, manage images, or deploy | [CLI Reference](#cli-reference) |
-| Upgraded GeoEngine and want to patch all artifacts and plugins | [`geoengine patch`](#geoengine-patch) |
+| Upgraded GeoEngine manually and want to patch all artifacts and plugins | [`geoengine patch`](#geoengine-patch) |
+| Want to upgrade GeoEngine and patch all artifacts in one step | [`geoengine update`](#geoengine-update) |
 
 ---
 
@@ -270,8 +273,8 @@ geoengine deploy <SUBCOMMAND>
 ### `geoengine patch`
 
 Validate all GeoEngine-managed artifacts and repair anything that is stale. Run
-this after upgrading GeoEngine to bring all workers and GIS plugins up to date
-in one shot.
+this after upgrading GeoEngine to bring all workers, GIS plugins, and agent
+skills up to date in one shot. (This is done automatically by `geoengine update`.)
 
 ```
 geoengine patch
@@ -291,12 +294,47 @@ No flags. The command:
    against the canonical version embedded in the binary. Reinstalls
    automatically if stale; skips entirely if the GIS application is not
    installed on the machine.
+4. **Agent skills** — syncs the GeoEngine skills from the local `skills/`
+   directory into each installed agent's skills folder (`~/.claude/skills` for
+   Claude, `~/.codex/skills` for Codex). Skills are compared by SHA-256 hash:
+   changed or missing skills are updated, identical ones skipped. Agents not
+   installed on the machine are silently skipped.
 
 Exits non-zero if any validation error is found (parse failures, missing
 paths, reinstall failures).
 
-**When to use:** After upgrading GeoEngine. Not needed as part of the normal
+**When to use:** After upgrading GeoEngine (or use `geoengine update` to
+upgrade and patch in one step). Not needed as part of the normal
 `init → apply → build` development loop.
+
+> **Important:** If `geoengine patch` reports that any agent skills were
+> updated (e.g. "Claude skills updated" or "Codex skills updated"), **remind
+> the user to restart the agent application** (Claude, Codex, or whichever
+> agent is in use) so that the newly synced skills are loaded. Skills are
+> read at agent startup and changes will not take effect in a running session.
+
+---
+
+### `geoengine update`
+
+Upgrade GeoEngine to the latest version and patch all artifacts in one step.
+Detects the original install method (Homebrew on macOS, curl install script on
+Linux/macOS/WSL2, PowerShell on Windows) and runs the appropriate updater,
+then automatically calls `geoengine patch`.
+
+```
+geoengine update
+```
+
+No flags.
+
+**When to use:** Whenever a GeoEngine update is available (look for the
+"⚡ Update available:" notice in any command's output). Prefer this over
+manually upgrading and then running `geoengine patch` separately.
+
+> **Important:** If the patch step reports that any agent skills were updated,
+> **remind the user to restart the agent application** so that the newly synced
+> skills are loaded.
 
 ---
 
@@ -343,7 +381,14 @@ geoengine deploy auth          # authenticate with GCP
 geoengine deploy push          # push image to registry
 ```
 
-**After upgrading GeoEngine:**
+**After upgrading GeoEngine manually (e.g. via Homebrew or curl):**
 ```bash
-geoengine patch                # validate all artifacts, patch stale Dockerfiles and GIS plugins
+geoengine patch                # validate all artifacts, patch stale Dockerfiles, GIS plugins, and agent skills
+# If skills were updated, restart your agent app to load the new skills
+```
+
+**Or — upgrade and patch in one step:**
+```bash
+geoengine update               # upgrades the binary, then automatically runs geoengine patch
+# If skills were updated, restart your agent app to load the new skills
 ```

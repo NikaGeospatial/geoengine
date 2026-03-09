@@ -185,7 +185,7 @@ geoengine delete
 
 ### Patch GeoEngine Artifacts
 
-`geoengine patch` performs a maintenance sweep across all GeoEngine-managed artifacts. Run it after upgrading GeoEngine to bring existing workers and plugins up to date automatically.
+`geoengine patch` performs a maintenance sweep across all GeoEngine-managed artifacts. Run it after upgrading GeoEngine to bring existing workers, plugins, and agent skills up to date automatically.
 
 ```bash
 geoengine patch
@@ -199,8 +199,17 @@ It checks and repairs the following:
   - `pixi.toml` — warns if missing (read-only, never modified)
   - `Dockerfile` and `.dockerignore` — compares content against the current canonical template; silently regenerates if stale or missing
 - GIS plugins
+- Agent skills — syncs the GeoEngine skills from the local `skills/` directory into each installed agent's skills folder (`~/.claude/skills` for Claude, `~/.codex/skills` for Codex). Skills are compared by SHA-256 hash: changed or missing skills are updated, identical skills are skipped. Agents not installed on the machine are silently skipped.
 
 The command exits with a non-zero status if any validation issue is found (parse errors, missing paths, reinstall failures), making it safe to use in scripts.
+
+### Update GeoEngine
+
+`geoengine update` updates GeoEngine to the latest version using the same installation method that was originally used (Homebrew on macOS if applicable, otherwise the curl install script on Linux/macOS/WSL2, or the PowerShell script on Windows). After a successful update it automatically runs `geoengine patch` to bring all workers, GIS plugins, and agent skills in sync with the new binary.
+
+```bash
+geoengine update
+```
 
 ### Image Management
 
@@ -410,7 +419,8 @@ CUDA is not available on macOS. PyTorch will automatically use the MPS (Metal) b
 | `geoengine delete [--name <worker>]`                           | Delete a worker, clean up state and saved configuration                                     |
 | `geoengine workers [--json] [--gis arcgis\|qgis]`              | List registered workers                                                                     |
 | `geoengine describe [<worker>] [--json]`                       | Displays information from saved configuration file of specified worker                      |
-| `geoengine patch`                                              | Validate all artifacts, regenerate (rewrite) stale Dockerfiles, and reinstall stale GIS plugin images |
+| `geoengine patch`                                              | Validate all artifacts, regenerate stale Dockerfiles, reinstall stale GIS plugins, and sync agent skills |
+| `geoengine update`                                             | Update GeoEngine to the latest version via the original install method, then automatically run `geoengine patch` |
 | `geoengine image list\|import\|remove`                         | Manage Docker images                                                                        |
 | `geoengine deploy auth\|push\|pull\|list`                      | GCP Artifact Registry operations                                                            |
 
@@ -487,7 +497,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 ## Known Issues
 
 ### QGIS Plugin
-- [ ] QGIS readonly file inputs currently use a custom widget with a selector of layer and file. Without this, non-geometry
+- [X] QGIS readonly file inputs currently use a custom widget with a selector of layer and file. Without this, non-geometry
   files cannot be input, however the UI does look a little clunky now. Until we discover a better way to handle this, this
   will be a limitation.
 - [ ] GeoEngine saves temporary files without file extensions; this can break scripts that expect an output filename to include an extension.
