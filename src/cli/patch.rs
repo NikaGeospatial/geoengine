@@ -10,319 +10,6 @@ use crate::config::yaml_store;
 use crate::docker::{dockerfile};
 use crate::utils::paths;
 
-
-/// Validate all GeoEngine artifacts and regenerate stale Dockerfiles and GIS plugins.
-///
-/// Global artifacts checked:
-///   - ~/.geoengine/settings.yaml  (parse validation)
-///   - ~/.geoengine/state/*.yaml   (parse + orphan check)
-///   - ~/.geoengine/configs/*.json (parse + orphan check)
-///
-/// Per-worker checks (for every registered worker):
-///   - Worker path existence
-///   - geoengine.yaml schema validation (read-only)
-///   - pixi.toml existence (read-only)
-///   - Dockerfile content vs. current canonical template (overwritten if stale)
-///   - .dockerignore content vs. current canonical template (overwritten if stale)
-///
-/// GIS plugin checks (skipped if the GIS application is not installed):
-///   - QGIS plugin files vs. embedded canonical content (reinstalled if stale)
-///   - ArcGIS plugin files vs. embedded canonical content (reinstalled if stale)
-#[deprecated(since="v0.4.3", note="please use `patch_all_v2()` instead")]
-pub async fn patch_all() -> Result<()> {
-    let mut issues: Vec<String> = Vec::new();
-    let mut dockerfiles_updated: usize = 0;
-    let mut plugins_updated: usize = 0;
-    let mut workers_checked: usize = 0;
-
-    // -----------------------------------------------------------------------
-    // 1. Load global settings
-    // -----------------------------------------------------------------------
-    println!("{}", "Checking global artifacts...".bold());
-
-    let settings = match Settings::load() {
-        Ok(s) => {
-            println!("  {} settings.yaml", "✓".green().bold());
-            s
-        }
-        Err(e) => {
-            let msg = format!("settings.yaml failed to parse: {}", e);
-            println!("  {} {}", "✗".red().bold(), msg);
-            issues.push(msg);
-            // Cannot continue without settings — report and exit
-            print_summary(workers_checked, dockerfiles_updated, 0, 0, &issues);
-            std::process::exit(1);
-        }
-    };
-
-    // -----------------------------------------------------------------------
-    // 2. Validate state files
-    // -----------------------------------------------------------------------
-    let state_dir = paths::get_state_dir()?;
-    let state_entries: Vec<PathBuf> = std::fs::read_dir(&state_dir)?
-        .filter_map(|e| e.ok().map(|d| d.path()))
-        .filter(|p| p.extension().map_or(false, |ext| ext == "yaml"))
-        .collect();
-
-    if !state_entries.is_empty() {
-        println!("\n{}", "Checking state files...".bold());
-    }
-
-    for path in &state_entries {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        match state::load_state(&stem) {
-            Ok(_) => {
-                let registered = settings.workers.contains_key(&stem);
-                if registered {
-                    println!("  {} state/{}.yaml", "✓".green().bold(), stem);
-                } else {
-                    let msg = format!(
-                        "state/{}.yaml is orphaned (no registered worker named '{}')",
-                        stem, stem
-                    );
-                    println!("  {} {}", "!".yellow().bold(), msg);
-                    issues.push(msg);
-                }
-            }
-            Err(e) => {
-                let msg = format!("state/{}.yaml failed to parse: {}", stem, e);
-                println!("  {} {}", "✗".red().bold(), msg);
-                issues.push(msg);
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 3. Validate saved config files
-    // -----------------------------------------------------------------------
-    let configs_dir = paths::get_config_dir()?.join("configs");
-    std::fs::create_dir_all(&configs_dir)?;
-    let config_entries: Vec<PathBuf> = std::fs::read_dir(&configs_dir)?
-        .filter_map(|e| e.ok().map(|d| d.path()))
-        .filter(|p| p.extension().map_or(false, |ext| ext == "json"))
-        .collect();
-
-    if !config_entries.is_empty() {
-        println!("\n{}", "Checking saved configs...".bold());
-    }
-
-    for path in &config_entries {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        match yaml_store::load_saved_config(&stem) {
-            Ok(_) => {
-                let registered = settings.workers.contains_key(&stem);
-                if registered {
-                    println!("  {} configs/{}.json", "✓".green().bold(), stem);
-                } else {
-                    let msg = format!(
-                        "configs/{}.json is orphaned (no registered worker named '{}')",
-                        stem, stem
-                    );
-                    println!("  {} {}", "!".yellow().bold(), msg);
-                    issues.push(msg);
-                }
-            }
-            Err(e) => {
-                let msg = format!("configs/{}.json failed to parse: {}", stem, e);
-                println!("  {} {}", "✗".red().bold(), msg);
-                issues.push(msg);
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 4. Per-worker sweep
-    // -----------------------------------------------------------------------
-    if !settings.workers.is_empty() {
-        println!("\n{}", "Checking registered workers...".bold());
-    }
-
-    let canonical_dockerfile = dockerfile::canonical_dockerfile_content();
-    let canonical_dockerignore = dockerfile::canonical_dockerignore_content();
-
-    let mut worker_names: Vec<&String> = settings.workers.keys().collect();
-    worker_names.sort();
-
-    for name in worker_names {
-        let worker_path = &settings.workers[name];
-        workers_checked += 1;
-
-        println!("\n  {}", name.cyan().bold());
-
-        // 4a. Path existence
-        if !worker_path.exists() {
-            let msg = format!(
-                "worker '{}' path does not exist: {}",
-                name,
-                worker_path.display()
-            );
-            println!("    {} Path not found: {}", "✗".red().bold(), worker_path.display());
-            issues.push(msg);
-            continue;
-        }
-        println!("    {} Path: {}", "✓".green().bold(), worker_path.display());
-
-        // 4b. geoengine.yaml schema validation
-        let yaml_path = worker_path.join("geoengine.yaml");
-        if !yaml_path.exists() {
-            let msg = format!("worker '{}' is missing geoengine.yaml", name);
-            println!("    {} geoengine.yaml missing", "✗".red().bold());
-            issues.push(msg);
-        } else {
-            match WorkerConfig::load(&yaml_path) {
-                Ok(_) => println!("    {} geoengine.yaml valid", "✓".green().bold()),
-                Err(e) => {
-                    let msg = format!("worker '{}' geoengine.yaml parse error: {}", name, e);
-                    println!("    {} geoengine.yaml parse error: {}", "✗".red().bold(), e);
-                    issues.push(msg);
-                }
-            }
-        }
-
-        // 4c. pixi.toml existence
-        let pixi_path = worker_path.join("pixi.toml");
-        if !pixi_path.exists() {
-            let msg = format!("worker '{}' is missing pixi.toml", name);
-            println!("    {} pixi.toml missing", "!".yellow().bold());
-            issues.push(msg);
-        } else {
-            println!("    {} pixi.toml present", "✓".green().bold());
-        }
-
-        // 4d. Dockerfile patch
-        let dockerfile_path = worker_path.join("Dockerfile");
-        let dockerfile_needs_update = if dockerfile_path.exists() {
-            match std::fs::read_to_string(&dockerfile_path) {
-                Ok(content) => content != canonical_dockerfile,
-                Err(_) => true,
-            }
-        } else {
-            true
-        };
-
-        // 4e. .dockerignore patch
-        let dockerignore_path = worker_path.join(".dockerignore");
-        let dockerignore_needs_update = if dockerignore_path.exists() {
-            match std::fs::read_to_string(&dockerignore_path) {
-                Ok(content) => content != canonical_dockerignore,
-                Err(_) => true,
-            }
-        } else {
-            true
-        };
-
-        if dockerfile_needs_update || dockerignore_needs_update {
-            match dockerfile::generate_dockerfile(worker_path) {
-                Ok(_) => {
-                    dockerfiles_updated += 1;
-                    if dockerfile_needs_update && dockerignore_needs_update {
-                        println!(
-                            "    {} Dockerfile and .dockerignore regenerated",
-                            "✓".green().bold()
-                        );
-                    } else if dockerfile_needs_update {
-                        println!("    {} Dockerfile regenerated", "✓".green().bold());
-                    } else {
-                        println!("    {} .dockerignore regenerated", "✓".green().bold());
-                    }
-                }
-                Err(e) => {
-                    let msg = format!(
-                        "worker '{}' Dockerfile regeneration failed: {}",
-                        name, e
-                    );
-                    println!("    {} Dockerfile regeneration failed: {}", "✗".red().bold(), e);
-                    issues.push(msg);
-                }
-            }
-        } else {
-            println!(
-                "    {} Dockerfile and .dockerignore up-to-date",
-                "•".cyan()
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 5. GIS plugin checks
-    // -----------------------------------------------------------------------
-    println!("\n{}", "Checking GIS plugins...".bold());
-
-    // QGIS
-    match plugins::patch_qgis().await {
-        Ok(PluginPatchResult::NotInstalled) => {
-            println!("  {} QGIS not installed on this machine — skipping", "•".cyan());
-        }
-        Ok(PluginPatchResult::UpToDate) => {
-            println!("  {} QGIS plugin up-to-date", "✓".green().bold());
-        }
-        Ok(PluginPatchResult::Updated) => {
-            plugins_updated += 1;
-            println!("  {} QGIS plugin reinstalled (files were stale)", "✓".green().bold());
-        }
-        Ok(PluginPatchResult::Failed(e)) => {
-            let msg = format!("QGIS plugin reinstall failed: {}", e);
-            println!("  {} {}", "✗".red().bold(), msg);
-            issues.push(msg);
-        }
-        Err(e) => {
-            let msg = format!("QGIS plugin check error: {}", e);
-            println!("  {} {}", "✗".red().bold(), msg);
-            issues.push(msg);
-        }
-    }
-
-    // ArcGIS
-    match plugins::patch_arcgis().await {
-        Ok(PluginPatchResult::NotInstalled) => {
-            println!("  {} ArcGIS not installed on this machine — skipping", "•".cyan());
-        }
-        Ok(PluginPatchResult::UpToDate) => {
-            println!("  {} ArcGIS plugin up-to-date", "✓".green().bold());
-        }
-        Ok(PluginPatchResult::Updated) => {
-            plugins_updated += 1;
-            println!(
-                "  {} ArcGIS plugin reinstalled (files were stale). {}",
-                "✓".green().bold(),
-                "Please restart ArcGIS to reload the toolbox.".bold()
-            );
-        }
-        Ok(PluginPatchResult::Failed(e)) => {
-            let msg = format!("ArcGIS plugin reinstall failed: {}", e);
-            println!("  {} {}", "✗".red().bold(), msg);
-            issues.push(msg);
-        }
-        Err(e) => {
-            let msg = format!("ArcGIS plugin check error: {}", e);
-            println!("  {} {}", "✗".red().bold(), msg);
-            issues.push(msg);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 6. Summary
-    // -----------------------------------------------------------------------
-    println!();
-    print_summary(workers_checked, dockerfiles_updated, plugins_updated, 0, &issues);
-
-    if !issues.is_empty() {
-        std::process::exit(1);
-    }
-
-    Ok(())
-}
-
 fn print_summary(
     workers_checked: usize,
     dockerfiles_updated: usize,
@@ -603,7 +290,7 @@ pub async fn patch_all_v2() -> Result<()> {
 
     println!("{}", "Checking global artifacts...".bold());
     if matches!(v2_run_global_checks(&mut ctx).await?, V2PatchFlow::AbortPatch) {
-        std::process::exit(1);
+        return Ok(());
     }
 
     let state_dir = paths::get_state_dir()?;
@@ -1062,27 +749,65 @@ fn v2_patch_arcgis_stage(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
 // - ctx (central config)
 // -------------------------------------------------------------------------------------------------
 
-/// A single file belonging to an embedded GeoEngine skill.
-struct SkillFile {
+/// An embedded GeoEngine skill (one entry per skill subdirectory).
+///
+/// `files` contains every file within the skill directory, collected recursively at compile
+/// time.  Each tuple is `(relative_path, content)` where `relative_path` is relative to the
+/// skill's own root (e.g. `"SKILL.md"` or `"assets/diagram.svg"`).
+struct SkillEntry {
     /// The skill's subdirectory name (e.g. `"use-geoengine"`).
     skill: &'static str,
-    /// The file name within that subdirectory (e.g. `"SKILL.md"`).
-    file: &'static str,
-    /// The file's content, embedded at compile time.
-    content: &'static str,
+    /// All files belonging to this skill, embedded at compile time.
+    files: &'static [(&'static str, &'static str)],
 }
 
-// All GeoEngine skill files, auto-generated at compile time from the `skills/` directory.
-// Adding, renaming, or removing a skill subdirectory or file is picked up automatically —
-// no changes to this file are required.
+// All GeoEngine skills, auto-generated at compile time from the `skills/` directory.
+// Adding, renaming, or removing a skill subdirectory or any file within one is picked up
+// automatically — no changes to this file are required.
 include!(concat!(env!("OUT_DIR"), "/skills_embedded.rs"));
+
+/// Computes a deterministic hash over all files in a `SkillEntry`.
+///
+/// Files are processed in their stored order (which is alphabetical by relative path,
+/// guaranteed by `build.rs`).  For each file the relative path and content are both
+/// mixed in so that renames are detected even when content is unchanged.
+fn skill_directory_hash(entry: &SkillEntry) -> String {
+    use crate::config::state;
+    // Concatenate "path\0content\0" for every file in sorted order.
+    let mut combined = String::new();
+    for (rel_path, content) in entry.files {
+        combined.push_str(rel_path);
+        combined.push('\0');
+        combined.push_str(content);
+        combined.push('\0');
+    }
+    state::sha256_string(&combined)
+}
+
+/// Computes the same hash for the on-disk version of a skill directory.
+///
+/// Reads every file listed in `entry.files` from `skill_dst` (relative paths
+/// preserved).  Returns `None` if any file is missing or unreadable — the caller
+/// treats that as stale.
+fn installed_skill_hash(entry: &SkillEntry, skill_dst: &std::path::Path) -> Option<String> {
+    use crate::config::state;
+    let mut combined = String::new();
+    for (rel_path, _) in entry.files {
+        let content = std::fs::read_to_string(skill_dst.join(rel_path)).ok()?;
+        combined.push_str(rel_path);
+        combined.push('\0');
+        combined.push_str(&content);
+        combined.push('\0');
+    }
+    Some(state::sha256_string(&combined))
+}
 
 /// Syncs all GeoEngine skills (embedded at compile time) into an agent's skills directory.
 ///
-/// For each skill in `SKILLS`:
-///   - If absent in the agent dir → write it.
-///   - If present but any file differs (by SHA-256) → overwrite it.
-///   - If present and identical → skip.
+/// For each `SkillEntry` in `SKILLS`:
+///   - If absent in the agent dir → write all its files (preserving subdirectory structure).
+///   - If present but the directory hash differs → overwrite all its files.
+///   - If present and hash matches → skip.
 ///
 /// Any skill subdirectory already in the agent dir is pruned only if it is known to be
 /// GeoEngine-managed (via `.geoengine-managed-skills` or a `geoengine-` prefix) and is no
@@ -1090,7 +815,6 @@ include!(concat!(env!("OUT_DIR"), "/skills_embedded.rs"));
 ///
 /// Returns the number of skills that were added, updated, or removed.
 fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
-    use crate::config::state;
     use std::collections::HashSet;
 
     let mut changed = 0usize;
@@ -1108,36 +832,24 @@ fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
         .unwrap_or_default();
 
     // --- 1. Upsert: write or overwrite skills that are new or stale ---
-    // Collect distinct skill names from the embedded set.
-    let mut skill_names: Vec<&str> = SKILLS.iter().map(|s| s.skill).collect();
-    skill_names.sort_unstable();
-    skill_names.dedup();
+    let skill_names: Vec<&str> = SKILLS.iter().map(|s| s.skill).collect();
 
-    for skill_name in &skill_names {
-        let skill_dst = agent_skills_dir.join(skill_name);
-        let skill_files: Vec<&SkillFile> = SKILLS.iter()
-            .filter(|s| s.skill == *skill_name)
-            .collect();
+    for entry in SKILLS {
+        let skill_dst = agent_skills_dir.join(entry.skill);
 
-        let mut skill_needs_update = !skill_dst.exists();
+        let canonical_hash = skill_directory_hash(entry);
+        let installed_hash = installed_skill_hash(entry, &skill_dst);
 
-        if !skill_needs_update {
-            for sf in &skill_files {
-                let dst_file = skill_dst.join(sf.file);
-                let up_to_date = std::fs::read_to_string(&dst_file)
-                    .map(|installed| state::sha256_string(&installed) == state::sha256_string(sf.content))
-                    .unwrap_or(false); // missing or unreadable → stale
-                if !up_to_date {
-                    skill_needs_update = true;
-                    break;
+        let needs_update = installed_hash.as_deref() != Some(canonical_hash.as_str());
+
+        if needs_update {
+            // Write every file, creating intermediate subdirectories as needed.
+            for (rel_path, content) in entry.files {
+                let dst = skill_dst.join(rel_path);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
                 }
-            }
-        }
-
-        if skill_needs_update {
-            std::fs::create_dir_all(&skill_dst)?;
-            for sf in &skill_files {
-                std::fs::write(skill_dst.join(sf.file), sf.content)?;
+                std::fs::write(&dst, content)?;
             }
             changed += 1;
         }
@@ -1164,7 +876,7 @@ fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
             if !is_geoengine_managed {
                 continue;
             }
-            if skill_names.binary_search(&dir_name.as_str()).is_err() {
+            if !skill_names.contains(&dir_name.as_str()) {
                 std::fs::remove_dir_all(&installed)?;
                 changed += 1;
             }

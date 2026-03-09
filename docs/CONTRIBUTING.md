@@ -64,3 +64,8 @@ e.g. adding a required state attribute, need to have a migratable patch action.
 This can be done by registering a function in `src/cli/patch.rs`. Find the correct stage your action should
 run in, register the function in the list, and then define the function. Refer to the other existing patch actions
 for examples.
+
+## 5. Pushing Releases
+Do the following in a new branch named `release/vX.Y.Z`:
+- [ ] Update `Cargo.toml` version
+- [ ] Run `cargo update` and push latest `Cargo.lock`.
