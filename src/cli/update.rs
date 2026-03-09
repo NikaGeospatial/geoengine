@@ -41,27 +41,26 @@ impl InstallMethod {
 }
 
 fn detect_install_method() -> InstallMethod {
-    // macOS: prefer Homebrew if `brew` exists AND `brew list --formula geoengine` succeeds
-    #[cfg(target_os = "macos")]
-    if which::which("brew").is_ok() {
-        if std::process::Command::new("brew")
-            .args(["list", "--formula", "geoengine"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+    if cfg!(target_os = "macos") {
+        // macOS: prefer Homebrew if `brew` exists AND `brew list --formula geoengine` succeeds
+        if which::which("brew").is_ok()
+            && std::process::Command::new("brew")
+                .args(["list", "--formula", "geoengine"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
         {
             return InstallMethod::Homebrew;
         }
+        return InstallMethod::Shell;
     }
 
-    // Windows
-    #[cfg(target_os = "windows")]
-    return InstallMethod::PowerShell;
+    if cfg!(target_os = "windows") {
+        return InstallMethod::PowerShell;
+    }
 
-    // Linux / macOS fallback (curl + bash)
-    #[cfg(not(target_os = "windows"))]
     InstallMethod::Shell
 }
 

@@ -603,7 +603,7 @@ pub async fn patch_all_v2() -> Result<()> {
 
     println!("{}", "Checking global artifacts...".bold());
     if matches!(v2_run_global_checks(&mut ctx).await?, V2PatchFlow::AbortPatch) {
-        return Ok(());
+        std::process::exit(1);
     }
 
     let state_dir = paths::get_state_dir()?;
@@ -714,7 +714,7 @@ fn v2_load_settings(ctx: &'_ mut PatchV2Ctx) -> BoxFuture<'_, Result<V2PatchFlow
                 println!("  {} {}", "✗".red().bold(), msg);
                 ctx.issues.push(msg);
                 print_summary(ctx.workers_checked, ctx.dockerfiles_updated, 0, 0, &ctx.issues);
-                std::process::exit(1);
+                Ok(V2PatchFlow::AbortPatch)
             }
         }
     })
@@ -1084,21 +1084,34 @@ include!(concat!(env!("OUT_DIR"), "/skills_embedded.rs"));
 ///   - If present but any file differs (by SHA-256) → overwrite it.
 ///   - If present and identical → skip.
 ///
-/// Any skill subdirectory already in the agent dir that is NOT in `SKILLS` is removed, so
-/// skills that have been deleted from GeoEngine do not linger in the agent's skills folder.
+/// Any skill subdirectory already in the agent dir is pruned only if it is known to be
+/// GeoEngine-managed (via `.geoengine-managed-skills` or a `geoengine-` prefix) and is no
+/// longer in `SKILLS`, so user/third-party skill folders are never deleted.
 ///
 /// Returns the number of skills that were added, updated, or removed.
 fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
     use crate::config::state;
+    use std::collections::HashSet;
 
     let mut changed = 0usize;
+    let manifest_path = agent_skills_dir.join(".geoengine-managed-skills");
+    let previously_managed: HashSet<String> = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .map(|content| {
+            content
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
 
     // --- 1. Upsert: write or overwrite skills that are new or stale ---
     // Collect distinct skill names from the embedded set.
     let mut skill_names: Vec<&str> = SKILLS.iter().map(|s| s.skill).collect();
-    skill_names.dedup(); // SKILLS is ordered, so adjacent duplicates == same skill
     skill_names.sort_unstable();
-    skill_names.dedup(); // deduplicate after sort to be safe
+    skill_names.dedup();
 
     for skill_name in &skill_names {
         let skill_dst = agent_skills_dir.join(skill_name);
@@ -1130,7 +1143,7 @@ fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
         }
     }
 
-    // --- 2. Prune: remove skill dirs that are no longer in the embedded set ---
+    // --- 2. Prune: remove only GeoEngine-managed skill dirs no longer in the embedded set ---
     if agent_skills_dir.exists() {
         let installed_skill_dirs: Vec<PathBuf> = std::fs::read_dir(agent_skills_dir)?
             .filter_map(|e| e.ok().map(|d| d.path()))
@@ -1146,12 +1159,25 @@ fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
             if dir_name.starts_with('.') {
                 continue;
             }
-            if !skill_names.contains(&dir_name.as_str()) {
+            let is_geoengine_managed = previously_managed.contains(&dir_name)
+                || dir_name.starts_with("geoengine-");
+            if !is_geoengine_managed {
+                continue;
+            }
+            if skill_names.binary_search(&dir_name.as_str()).is_err() {
                 std::fs::remove_dir_all(&installed)?;
                 changed += 1;
             }
         }
     }
+
+    // Persist currently managed skill names for safe future pruning.
+    let manifest_content = if skill_names.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", skill_names.join("\n"))
+    };
+    std::fs::write(manifest_path, manifest_content)?;
 
     Ok(changed)
 }

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::state;
 
@@ -19,6 +19,9 @@ pub struct PluginFile {
 // no changes to this file are required.
 include!(concat!(env!("OUT_DIR"), "/plugins_embedded.rs"));
 
+const ARCGIS_GE_PLUGIN: &str = "arcgis-ge";
+const QGIS_GE_PLUGIN: &str = "qgis-ge";
+
 /// Install the GeoEngine plugin into ArcGIS Pro's toolbox directory.
 pub async fn register_arcgis(custom_path: Option<PathBuf>) -> Result<()> {
     println!(
@@ -34,7 +37,7 @@ pub async fn register_arcgis(custom_path: Option<PathBuf>) -> Result<()> {
 
     std::fs::create_dir_all(&toolbox_dir)?;
 
-    write_plugin_files("arcgis-ge", &toolbox_dir)?;
+    write_plugin_files(ARCGIS_GE_PLUGIN, &toolbox_dir)?;
     println!(
         "{} Installed GeoEngine toolbox to: {}",
         "✓".green().bold(),
@@ -60,7 +63,7 @@ pub async fn register_qgis(custom_path: Option<PathBuf>) -> Result<()> {
     let geoengine_dir = plugin_dir.join("geoengine");
     std::fs::create_dir_all(&geoengine_dir)?;
 
-    write_plugin_files("qgis-ge", &geoengine_dir)?;
+    write_plugin_files(QGIS_GE_PLUGIN, &geoengine_dir)?;
 
     println!(
         "{} Installed GeoEngine plugin to: {}",
@@ -86,7 +89,7 @@ fn missing_files(base: &PathBuf, required: &[&str]) -> Vec<String> {
 pub fn verify_arcgis_plugin_installed() -> Result<bool> {
     let arcgis_dir = find_arcgis_toolbox_dir()?;
     let required: Vec<&str> = PLUGIN_FILES.iter()
-        .filter(|pf| pf.plugin == "arcgis-ge")
+        .filter(|pf| pf.plugin == ARCGIS_GE_PLUGIN)
         .map(|pf| pf.file)
         .collect();
     Ok(missing_files(&arcgis_dir, &required).is_empty())
@@ -96,7 +99,7 @@ pub fn verify_arcgis_plugin_installed() -> Result<bool> {
 pub fn verify_qgis_plugin_installed() -> Result<bool> {
     let qgis_dir = find_qgis_plugin_dir()?.join("geoengine");
     let required: Vec<&str> = PLUGIN_FILES.iter()
-        .filter(|pf| pf.plugin == "qgis-ge")
+        .filter(|pf| pf.plugin == QGIS_GE_PLUGIN)
         .map(|pf| pf.file)
         .collect();
     Ok(missing_files(&qgis_dir, &required).is_empty())
@@ -132,7 +135,7 @@ pub async fn patch_qgis() -> Result<PluginPatchResult> {
     let geoengine_dir = plugin_dir.join("geoengine");
 
     let canonical: Vec<&PluginFile> = PLUGIN_FILES.iter()
-        .filter(|pf| pf.plugin == "qgis-ge")
+        .filter(|pf| pf.plugin == QGIS_GE_PLUGIN)
         .collect();
 
     let needs_update = canonical.iter().any(|pf| {
@@ -158,7 +161,7 @@ pub async fn patch_qgis() -> Result<PluginPatchResult> {
     }
     std::fs::create_dir_all(&geoengine_dir)?;
 
-    match write_plugin_files("qgis-ge", &geoengine_dir) {
+    match write_plugin_files(QGIS_GE_PLUGIN, &geoengine_dir) {
         Ok(_) => Ok(PluginPatchResult::Updated),
         Err(e) => Ok(PluginPatchResult::Failed(e)),
     }
@@ -179,7 +182,7 @@ pub async fn patch_arcgis() -> Result<PluginPatchResult> {
     }
 
     let canonical: Vec<&PluginFile> = PLUGIN_FILES.iter()
-        .filter(|pf| pf.plugin == "arcgis-ge")
+        .filter(|pf| pf.plugin == ARCGIS_GE_PLUGIN)
         .collect();
 
     let needs_update = canonical.iter().any(|pf| {
@@ -194,9 +197,39 @@ pub async fn patch_arcgis() -> Result<PluginPatchResult> {
         return Ok(PluginPatchResult::UpToDate);
     }
 
+    if toolbox_dir.exists() {
+        for entry in std::fs::read_dir(&toolbox_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let is_geoengine_related = name.to_ascii_lowercase().contains("geoengine");
+            let is_current_arcgis_file = canonical.iter().any(|pf| pf.file == name);
+            if !is_geoengine_related && !is_current_arcgis_file {
+                continue;
+            }
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).with_context(|| {
+                    format!(
+                        "Failed to remove existing ArcGIS plugin directory: {}",
+                        path.display()
+                    )
+                })?;
+            } else {
+                std::fs::remove_file(&path).with_context(|| {
+                    format!(
+                        "Failed to remove existing ArcGIS plugin file: {}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+    }
     std::fs::create_dir_all(&toolbox_dir)?;
 
-    match write_plugin_files("arcgis-ge", &toolbox_dir) {
+    match write_plugin_files(ARCGIS_GE_PLUGIN, &toolbox_dir) {
         Ok(_) => Ok(PluginPatchResult::Updated),
         Err(e) => Ok(PluginPatchResult::Failed(e)),
     }
@@ -259,7 +292,7 @@ fn find_qgis_plugin_dir() -> Result<PathBuf> {
 }
 
 /// Writes all embedded files for the given plugin to `dir`.
-fn write_plugin_files(plugin: &str, dir: &PathBuf) -> Result<()> {
+fn write_plugin_files(plugin: &str, dir: &Path) -> Result<()> {
     for pf in PLUGIN_FILES.iter().filter(|pf| pf.plugin == plugin) {
         std::fs::write(dir.join(pf.file), pf.content)?;
     }
