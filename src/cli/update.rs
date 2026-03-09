@@ -107,39 +107,34 @@ async fn update_via_shell() -> Result<()> {
         "{}",
         format!("==> Downloading {} @ {}", archive_name, tag).blue()
     );
-    let req_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+
+    // Separate clients: tight total timeout for small metadata fetches; connection-only
+    // timeout for archive downloads so large binaries on slow links don't time out.
+    let meta_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let archive_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let expected_hash = fetch_expected_checksum(&archive_name, &tag, &req_client).await?;
+    let expected_hash = fetch_expected_checksum(&archive_name, &tag, &meta_client).await?;
     let (archive_path, actual_hash) =
-        download_to_temp_file(&archive_url, &req_client, "geoengine_archive", "tar.gz")
+        download_to_temp_file(&archive_url, &archive_client, "geoengine_archive", "tar.gz")
             .await
             .with_context(|| format!("Failed to download {}", archive_url))?;
 
     verify_checksum(&archive_name, &expected_hash, &actual_hash)?;
 
-    // Extract the binary directly from the on-disk archive.
-    let tmp_binary = extract_binary_from_tar_path(&archive_path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&archive_path);
-    })?;
+    // Extract the binary and install script from the verified archive.
+    // The script is bundled in the archive so it inherits the same integrity guarantee
+    // as the binary — no separate network fetch is needed.
+    let archive_for_spawn = archive_path.clone();
+    let extract_result =
+        tokio::task::spawn_blocking(move || extract_from_tar(&archive_for_spawn))
+            .await
+            .context("Extraction task panicked")?;
     let _ = std::fs::remove_file(&archive_path);
-
-    let script_url = format!(
-        "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.sh",
-        tag
-    );
-    println!("{}", format!("==> Downloading install.sh @ {}", tag).blue());
-    let script_bytes = fetch_bytes(&script_url, &req_client)
-        .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp_binary);
-        })
-        .context("Failed to download install.sh")?;
-
-    let tmp_script = write_temp_script(&script_bytes, "install", "sh").inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp_binary);
-    })?;
+    let (tmp_binary, tmp_script) = extract_result?;
 
     println!(
         "{}",
@@ -187,42 +182,32 @@ async fn update_via_powershell() -> Result<()> {
         "{}",
         format!("==> Downloading {} @ {}", archive_name, tag).blue()
     );
-    let req_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+
+    // Separate clients: tight total timeout for small metadata fetches; connection-only
+    // timeout for archive downloads so large binaries on slow links don't time out.
+    let meta_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let archive_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let expected_hash = fetch_expected_checksum(&archive_name, &tag, &req_client).await?;
+    let expected_hash = fetch_expected_checksum(&archive_name, &tag, &meta_client).await?;
     let (archive_path, actual_hash) =
-        download_to_temp_file(&archive_url, &req_client, "geoengine_archive", "zip")
+        download_to_temp_file(&archive_url, &archive_client, "geoengine_archive", "zip")
             .await
             .with_context(|| format!("Failed to download {}", archive_url))?;
 
     verify_checksum(&archive_name, &expected_hash, &actual_hash)?;
 
-    // Extract geoengine.exe directly from the on-disk archive.
-    let tmp_binary = extract_binary_from_zip_path(&archive_path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&archive_path);
-    })?;
+    // Extract the binary and install script from the verified archive.
+    let archive_for_spawn = archive_path.clone();
+    let extract_result =
+        tokio::task::spawn_blocking(move || extract_from_zip(&archive_for_spawn))
+            .await
+            .context("Extraction task panicked")?;
     let _ = std::fs::remove_file(&archive_path);
-
-    let script_url = format!(
-        "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.ps1",
-        tag
-    );
-    println!(
-        "{}",
-        format!("==> Downloading install.ps1 @ {}", tag).blue()
-    );
-    let script_bytes = fetch_bytes(&script_url, &req_client)
-        .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp_binary);
-        })
-        .context("Failed to download install.ps1")?;
-
-    let tmp_script = write_temp_script(&script_bytes, "install", "ps1").inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp_binary);
-    })?;
+    let (tmp_binary, tmp_script) = extract_result?;
 
     println!(
         "{}",
@@ -299,6 +284,9 @@ fn current_platform() -> Result<&'static str> {
 /// replace `checksums.txt` with matching hashes. The primary security
 /// guarantee here is transport integrity via HTTPS; the checksum file provides
 /// an additional layer for detecting bit-rot or partial downloads.
+///
+/// The install script is bundled inside the release archive rather than
+/// fetched separately, so it inherits the same integrity check as the binary.
 async fn fetch_expected_checksum(
     archive_name: &str,
     tag: &str,
@@ -310,7 +298,7 @@ async fn fetch_expected_checksum(
     );
 
     println!("{}", "==> Fetching checksums.txt...".blue());
-    let checksums_text = fetch_bytes(&checksums_url, &req_client)
+    let checksums_text = fetch_bytes(&checksums_url, req_client)
         .await
         .context("Failed to download checksums.txt")?;
     let checksums_text =
@@ -369,54 +357,114 @@ fn verify_checksum(archive_name: &str, expected_hash: &str, actual_hash: &str) -
 
     println!(
         "{}",
-        format!("✓ Checksum verified ({})", &actual_hash[..16]).green()
+        format!("✓ Checksum verified (sha256: {})", actual_hash).green()
     );
     Ok(())
 }
 
-/// Extract the `geoengine` binary from an on-disk `.tar.gz` archive
-/// and write it to a temp file. Returns the path to the binary.
-fn extract_binary_from_tar_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open archive {}", path.display()))?;
+/// Extract the `geoengine` binary and `install.sh` script from a `.tar.gz` archive
+/// in a single pass. Returns `(binary_path, script_path)`.
+///
+/// Intended to be called via `tokio::task::spawn_blocking` since it performs
+/// blocking I/O.
+fn extract_from_tar(
+    archive_path: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let file = std::fs::File::open(archive_path)
+        .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
 
-    let out_path = std::env::temp_dir().join(format!("geoengine_{}_bin", std::process::id()));
+    let pid = std::process::id();
+    let binary_out = std::env::temp_dir().join(format!("geoengine_{}_bin", pid));
+    let script_out = std::env::temp_dir().join(format!("geoengine_{}_install.sh", pid));
+
+    let mut binary_done = false;
+    let mut script_done = false;
 
     for entry in archive.entries().context("Failed to read tar entries")? {
         let mut entry = entry.context("Failed to read tar entry")?;
-        let path = entry.path().context("Failed to read entry path")?;
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if name == "geoengine" {
-            let mut out_file = std::fs::File::create(&out_path)
-                .with_context(|| format!("Failed to create {}", out_path.display()))?;
-            std::io::copy(&mut entry, &mut out_file).inspect_err(|_| {
-                let _ = std::fs::remove_file(&out_path);
-            })?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755))?;
+        let name = {
+            let p = entry.path().context("Failed to read entry path")?;
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned()
+        };
+
+        match name.as_str() {
+            "geoengine" if !binary_done => {
+                let mut out = std::fs::File::create(&binary_out)
+                    .with_context(|| format!("Failed to create {}", binary_out.display()))?;
+                std::io::copy(&mut entry, &mut out).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&binary_out);
+                })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(
+                        &binary_out,
+                        std::fs::Permissions::from_mode(0o755),
+                    )?;
+                }
+                binary_done = true;
             }
-            return Ok(out_path);
+            "install.sh" if !script_done => {
+                let mut out = std::fs::File::create(&script_out)
+                    .with_context(|| format!("Failed to create {}", script_out.display()))?;
+                std::io::copy(&mut entry, &mut out).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&script_out);
+                })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(
+                        &script_out,
+                        std::fs::Permissions::from_mode(0o700),
+                    )?;
+                }
+                script_done = true;
+            }
+            _ => {}
+        }
+
+        if binary_done && script_done {
+            break;
         }
     }
 
-    bail!("Binary 'geoengine' not found inside tar.gz archive")
+    if !binary_done {
+        if script_done {
+            let _ = std::fs::remove_file(&script_out);
+        }
+        bail!("Binary 'geoengine' not found inside tar.gz archive");
+    }
+    if !script_done {
+        let _ = std::fs::remove_file(&binary_out);
+        bail!("Script 'install.sh' not found inside tar.gz archive");
+    }
+
+    Ok((binary_out, script_out))
 }
 
-/// Extract `geoengine.exe` from an on-disk `.zip` archive
-/// and write it to a temp file. Returns the path to the binary.
-fn extract_binary_from_zip_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open archive {}", path.display()))?;
+/// Extract `geoengine.exe` and `install.ps1` from a `.zip` archive.
+/// Returns `(binary_path, script_path)`.
+///
+/// Intended to be called via `tokio::task::spawn_blocking` since it performs
+/// blocking I/O.
+fn extract_from_zip(
+    archive_path: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let file = std::fs::File::open(archive_path)
+        .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
     let mut zip = zip::ZipArchive::new(file).context("Failed to read zip archive")?;
 
-    let out_path = std::env::temp_dir().join(format!("geoengine_{}_bin.exe", std::process::id()));
+    let pid = std::process::id();
+    let binary_out = std::env::temp_dir().join(format!("geoengine_{}_bin.exe", pid));
+    let script_out = std::env::temp_dir().join(format!("geoengine_{}_install.ps1", pid));
+
+    let mut binary_done = false;
+    let mut script_done = false;
 
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).context("Failed to read zip entry")?;
@@ -425,17 +473,50 @@ fn extract_binary_from_zip_path(path: &std::path::Path) -> Result<std::path::Pat
         let name = std::path::Path::new(entry.name())
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if name == "geoengine.exe" {
-            let mut out_file = std::fs::File::create(&out_path)
-                .with_context(|| format!("Failed to create {}", out_path.display()))?;
-            std::io::copy(&mut entry, &mut out_file)
-                .context("Failed to extract binary from zip")?;
-            return Ok(out_path);
+            .unwrap_or_default()
+            .to_owned();
+
+        match name.as_str() {
+            "geoengine.exe" if !binary_done => {
+                let mut out = std::fs::File::create(&binary_out)
+                    .with_context(|| format!("Failed to create {}", binary_out.display()))?;
+                std::io::copy(&mut entry, &mut out)
+                    .inspect_err(|_| {
+                        let _ = std::fs::remove_file(&binary_out);
+                    })
+                    .context("Failed to extract binary from zip")?;
+                binary_done = true;
+            }
+            "install.ps1" if !script_done => {
+                let mut out = std::fs::File::create(&script_out)
+                    .with_context(|| format!("Failed to create {}", script_out.display()))?;
+                std::io::copy(&mut entry, &mut out)
+                    .inspect_err(|_| {
+                        let _ = std::fs::remove_file(&script_out);
+                    })
+                    .context("Failed to extract install.ps1 from zip")?;
+                script_done = true;
+            }
+            _ => {}
+        }
+
+        if binary_done && script_done {
+            break;
         }
     }
 
-    bail!("Binary 'geoengine.exe' not found inside zip archive")
+    if !binary_done {
+        if script_done {
+            let _ = std::fs::remove_file(&script_out);
+        }
+        bail!("Binary 'geoengine.exe' not found inside zip archive");
+    }
+    if !script_done {
+        let _ = std::fs::remove_file(&binary_out);
+        bail!("Script 'install.ps1' not found inside zip archive");
+    }
+
+    Ok((binary_out, script_out))
 }
 
 const GITHUB_API_LATEST: &str =
@@ -571,25 +652,6 @@ async fn create_temp_file(
     }
 
     bail!("Failed to create a unique temp file in {}", dir.display())
-}
-
-/// Write `data` to a temporary file and return the path.
-/// The caller is responsible for cleanup; the file persists until the OS
-/// removes it (typically on reboot) or the process exits on most platforms.
-fn write_temp_script(data: &[u8], prefix: &str, ext: &str) -> Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir();
-    let name = format!("{}_{}.{}", prefix, std::process::id(), ext);
-    let path = dir.join(name);
-    std::fs::write(&path, data)
-        .with_context(|| format!("Failed to write temp script to {}", path.display()))?;
-    // Make executable on Unix.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("Failed to chmod {}", path.display()))?;
-    }
-    Ok(path)
 }
 
 /// Run a command, streaming its stdout/stderr to the terminal.

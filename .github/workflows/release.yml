@@ -67,14 +67,16 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czvf ../../../${{ matrix.name }}.tar.gz geoengine
+          cp ${{ github.workspace }}/install/install.sh .
+          tar -czvf ../../../${{ matrix.name }}.tar.gz geoengine install.sh
           cd ../../..
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path geoengine.exe -DestinationPath ../../../${{ matrix.name }}.zip
+          Copy-Item "$env:GITHUB_WORKSPACE\install\install.ps1" .
+          Compress-Archive -Path geoengine.exe,install.ps1 -DestinationPath ../../../${{ matrix.name }}.zip
           cd ../../..
 
       - name: Upload artifact (Unix)
@@ -111,9 +113,15 @@ jobs:
         run: |
           # Run sha256sum inside each artifact subdirectory so the output
           # contains only the bare filename with no leading path components.
+          # Explicitly match only .tar.gz and .zip to avoid hashing unexpected files.
           > checksums.txt
           for dir in artifacts/*/; do
-            (cd "$dir" && sha256sum *) >> checksums.txt
+            (
+              cd "$dir"
+              for f in *.tar.gz *.zip; do
+                [ -f "$f" ] && sha256sum "$f"
+              done
+            ) >> checksums.txt
           done
           sort -k2 checksums.txt -o checksums.txt
           cat checksums.txt

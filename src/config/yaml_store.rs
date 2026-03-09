@@ -60,6 +60,10 @@ pub fn delete_saved_config(worker_name: &str) -> Result<()> {
 /// Rename a saved config file from old_name to new_name.
 /// Returns Ok(()) even if no saved config exists for old_name (nothing to migrate).
 pub fn rename_saved_config(old_name: &str, new_name: &str) -> Result<()> {
+    if old_name == new_name {
+        return Ok(());
+    }
+
     let old_path = config_path(old_name)?;
     let new_path = config_path(new_name)?;
 
