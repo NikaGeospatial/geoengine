@@ -103,12 +103,23 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f
 
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) \
+            | sort \
+            | xargs sha256sum \
+            | sed 's|\.\/[^/]*/||' \
+            > ../checksums.txt
+          cat ../checksums.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
+            checksums.txt
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
