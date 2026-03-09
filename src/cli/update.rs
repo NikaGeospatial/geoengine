@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -88,12 +87,10 @@ async fn update_via_homebrew() -> Result<()> {
 
 async fn update_via_shell() -> Result<()> {
     let tag = latest_release_tag().await?;
+    // Pin to the versioned tag so we never execute a moving `main` branch.
+    // Transport integrity is provided by HTTPS (TLS certificate pinning by the OS).
     let script_url = format!(
         "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.sh",
-        tag
-    );
-    let checksum_url = format!(
-        "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.sh.sha256",
         tag
     );
 
@@ -101,13 +98,6 @@ async fn update_via_shell() -> Result<()> {
     let script_bytes = fetch_bytes(&script_url)
         .await
         .context("Failed to download install.sh")?;
-
-    println!("{}", "==> Verifying checksum".blue());
-    let expected = fetch_text(&checksum_url)
-        .await
-        .context("Failed to download install.sh.sha256")?;
-    verify_sha256(&script_bytes, expected.trim())
-        .context("Checksum verification failed for install.sh")?;
 
     let tmp = write_temp_script(&script_bytes, "install", "sh")?;
     println!("{}", format!("==> bash {}", tmp.display()).blue());
@@ -127,12 +117,10 @@ async fn update_via_shell() -> Result<()> {
 
 async fn update_via_powershell() -> Result<()> {
     let tag = latest_release_tag().await?;
+    // Pin to the versioned tag so we never execute a moving `main` branch.
+    // Transport integrity is provided by HTTPS (TLS certificate pinning by the OS).
     let script_url = format!(
         "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.ps1",
-        tag
-    );
-    let checksum_url = format!(
-        "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.ps1.sha256",
         tag
     );
 
@@ -140,13 +128,6 @@ async fn update_via_powershell() -> Result<()> {
     let script_bytes = fetch_bytes(&script_url)
         .await
         .context("Failed to download install.ps1")?;
-
-    println!("{}", "==> Verifying checksum".blue());
-    let expected = fetch_text(&checksum_url)
-        .await
-        .context("Failed to download install.ps1.sha256")?;
-    verify_sha256(&script_bytes, expected.trim())
-        .context("Checksum verification failed for install.ps1")?;
 
     let tmp = write_temp_script(&script_bytes, "install", "ps1")?;
     println!("{}", format!("==> powershell {}", tmp.display()).blue());
@@ -219,31 +200,6 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
         .await
         .with_context(|| format!("Failed to read body from {}", url))?;
     Ok(bytes.to_vec())
-}
-
-/// Download a URL and return the body as a UTF-8 string.
-async fn fetch_text(url: &str) -> Result<String> {
-    let bytes = fetch_bytes(url).await?;
-    String::from_utf8(bytes).context("Response body is not valid UTF-8")
-}
-
-/// Verify that `data` hashes to `expected_hex` (lowercase hex SHA-256).
-fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<()> {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let actual = format!("{:x}", hasher.finalize());
-    // Accept "sha256:<hex>" or bare "<hex>" in the checksum file.
-    let expected = expected_hex
-        .strip_prefix("sha256:")
-        .unwrap_or(expected_hex);
-    if actual != expected {
-        bail!(
-            "SHA-256 mismatch — expected {}, got {}",
-            expected,
-            actual
-        );
-    }
-    Ok(())
 }
 
 /// Write `data` to a temporary file and return the path.

@@ -294,7 +294,11 @@ fn find_qgis_plugin_dir() -> Result<PathBuf> {
 /// Writes all embedded files for the given plugin to `dir`.
 fn write_plugin_files(plugin: &str, dir: &Path) -> Result<()> {
     for pf in PLUGIN_FILES.iter().filter(|pf| pf.plugin == plugin) {
-        std::fs::write(dir.join(pf.file), pf.content)?;
+        let dst = dir.join(pf.file);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(dst, pf.content)?;
     }
     Ok(())
 }
