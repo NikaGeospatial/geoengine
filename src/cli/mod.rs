@@ -2,6 +2,7 @@ pub mod deploy;
 pub mod image;
 pub mod patch;
 pub mod plugins;
+pub mod update;
 pub mod worker;
 pub mod settings;
 
@@ -133,7 +134,10 @@ enum Commands {
 
     /// Validate and patch all GeoEngine artifacts and registered workers
     Patch,
-    
+
+    /// Update GeoEngine to the latest version
+    Update,
+
     /// Manage global environment variables across all workers
     Env {
         #[command(subcommand)]
@@ -177,6 +181,7 @@ impl Cli {
             Commands::Diff { file } => worker::diff_worker(file.as_deref()).await,
             Commands::Deploy { command } => command.execute().await,
             Commands::Patch => patch::patch_all_v2().await,
+            Commands::Update => update::update_geoengine().await,
             Commands::Env { command } => command.execute().await,
         }
     }
