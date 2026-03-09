@@ -372,13 +372,14 @@ fn parse_checksum_line(line: &str) -> Option<(&str, &str)> {
     let line = line.trim();
     let separator_idx = line.find(|c: char| c.is_whitespace())?;
     let (hash, remainder) = line.split_at(separator_idx);
-    let name = remainder.trim_start().trim_start_matches('*');
+    let name = remainder.trim_start();
+    let stripped_name = name.strip_prefix('*').unwrap_or(name);
 
-    if hash.is_empty() || name.is_empty() {
+    if hash.is_empty() || stripped_name.is_empty() {
         return None;
     }
 
-    Some((hash, name))
+    Some((hash, stripped_name))
 }
 
 fn temp_file_name_stem(prefix: &str) -> String {
@@ -390,12 +391,17 @@ fn temp_file_name_stem(prefix: &str) -> String {
     format!("{}_{}_{}", prefix, pid, now)
 }
 
-fn temp_file_candidate_path(stem: &str, ext: Option<&str>, attempt: u32) -> std::path::PathBuf {
+fn temp_file_candidate_path(
+    dir: &std::path::Path,
+    stem: &str,
+    ext: Option<&str>,
+    attempt: u32,
+) -> std::path::PathBuf {
     let name = match ext {
         Some(ext) => format!("{}_{}.{}", stem, attempt, ext),
         None => format!("{}_{}", stem, attempt),
     };
-    std::env::temp_dir().join(name)
+    dir.join(name)
 }
 
 fn create_temp_file_blocking(
@@ -406,7 +412,7 @@ fn create_temp_file_blocking(
     let stem = temp_file_name_stem(prefix);
 
     for attempt in 0..10u32 {
-        let path = temp_file_candidate_path(&stem, ext, attempt);
+        let path = temp_file_candidate_path(&dir, &stem, ext, attempt);
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -739,7 +745,7 @@ async fn create_temp_file(
     let stem = temp_file_name_stem(prefix);
 
     for attempt in 0..10u32 {
-        let path = temp_file_candidate_path(&stem, Some(ext), attempt);
+        let path = temp_file_candidate_path(&dir, &stem, Some(ext), attempt);
         match tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -778,7 +784,7 @@ async fn run_command(program: &str, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_checksum_from_text, parse_checksum_line};
+    use super::{expected_checksum_from_text, parse_checksum_line, temp_file_candidate_path};
 
     const HASH_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const HASH_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -800,6 +806,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_checksum_line_returns_none_for_empty_input() {
+        assert_eq!(parse_checksum_line(""), None);
+    }
+
+    #[test]
+    fn parse_checksum_line_returns_none_without_separator() {
+        assert_eq!(parse_checksum_line(HASH_A), None);
+    }
+
+    #[test]
+    fn parse_checksum_line_returns_none_for_empty_name_after_binary_marker() {
+        assert_eq!(parse_checksum_line(&format!("{HASH_A} *")), None);
+    }
+
+    #[test]
+    fn expected_checksum_from_text_returns_matching_hash() {
+        let checksums = format!(
+            "{HASH_A}  geoengine-linux-x86_64.tar.gz\n{HASH_B} *geoengine-windows-x86_64.zip\n"
+        );
+
+        let hash = expected_checksum_from_text(&checksums, "geoengine-windows-x86_64.zip")
+            .expect("expected archive entry should return its checksum");
+
+        assert_eq!(hash, HASH_B);
+    }
+
+    #[test]
     fn expected_checksum_from_text_errors_when_archive_is_missing() {
         let checksums = format!(
             "{HASH_A}  geoengine-linux-x86_64.tar.gz\n{HASH_B} *geoengine-windows-x86_64.zip\n"
@@ -811,5 +844,15 @@ mod tests {
         assert!(err
             .to_string()
             .contains("No checksum entry found for 'geoengine-darwin-aarch64.tar.gz'"));
+    }
+
+    #[test]
+    fn temp_file_candidate_path_uses_provided_dir() {
+        let dir = std::path::Path::new("/tmp/custom-dir");
+
+        assert_eq!(
+            temp_file_candidate_path(dir, "geoengine_test", Some("sh"), 3),
+            dir.join("geoengine_test_3.sh")
+        );
     }
 }
