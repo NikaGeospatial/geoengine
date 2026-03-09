@@ -10,7 +10,6 @@ use crate::config::yaml_store;
 use crate::docker::{dockerfile};
 use crate::utils::paths;
 
-use sha2::{Digest, Sha256};
 
 /// Validate all GeoEngine artifacts and regenerate stale Dockerfiles and GIS plugins.
 ///
@@ -29,6 +28,7 @@ use sha2::{Digest, Sha256};
 /// GIS plugin checks (skipped if the GIS application is not installed):
 ///   - QGIS plugin files vs. embedded canonical content (reinstalled if stale)
 ///   - ArcGIS plugin files vs. embedded canonical content (reinstalled if stale)
+#[deprecated(since="v0.4.3", note="please use `patch_all_v2()` instead")]
 pub async fn patch_all() -> Result<()> {
     let mut issues: Vec<String> = Vec::new();
     let mut dockerfiles_updated: usize = 0;
@@ -371,7 +371,7 @@ fn print_summary(
             )
         }
         if skills_updated > 0 {
-            println!("  {} Restart agents to get latest skill{}",
+            println!("  {} Restart agents to get latest skill{}.",
                 "!".yellow().bold(),
                 if skills_updated == 1 { "" } else { "s" },
             )
@@ -1062,68 +1062,59 @@ fn v2_patch_arcgis_stage(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
 // - ctx (central config)
 // -------------------------------------------------------------------------------------------------
 
-/// Returns a SHA-256 hex digest of a file's contents, or `None` if the file cannot be read.
-fn file_sha256(path: &std::path::Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let digest = Sha256::digest(&bytes);
-    Some(format!("{:x}", digest))
+/// A single file belonging to an embedded GeoEngine skill.
+struct SkillFile {
+    /// The skill's subdirectory name (e.g. `"use-geoengine"`).
+    skill: &'static str,
+    /// The file name within that subdirectory (e.g. `"SKILL.md"`).
+    file: &'static str,
+    /// The file's content, embedded at compile time.
+    content: &'static str,
 }
 
-/// Syncs all skills from the GeoEngine `skills/` source directory into an agent's skills
-/// directory. Skills are identified by their subdirectory name. Each skill contains a `SKILL.md`
-/// file (and potentially other files in the future). If the agent's skills directory does not
-/// exist, the entire sync is skipped.
+// All GeoEngine skill files, auto-generated at compile time from the `skills/` directory.
+// Adding, renaming, or removing a skill subdirectory or file is picked up automatically —
+// no changes to this file are required.
+include!(concat!(env!("OUT_DIR"), "/skills_embedded.rs"));
+
+/// Syncs all GeoEngine skills (embedded at compile time) into an agent's skills directory.
 ///
-/// For each skill found in the source:
-///   - If the skill is absent in the agent dir → copy it in.
-///   - If the skill is present but any file differs (by SHA-256) → overwrite it.
-///   - If the skill is present and identical → skip.
+/// For each skill in `SKILLS`:
+///   - If absent in the agent dir → write it.
+///   - If present but any file differs (by SHA-256) → overwrite it.
+///   - If present and identical → skip.
 ///
-/// Returns the number of skills that were added or updated.
-fn sync_skills_to_agent(source_skills_dir: &std::path::Path, agent_skills_dir: &std::path::Path) -> Result<usize> {
-    let mut updated = 0usize;
+/// Any skill subdirectory already in the agent dir that is NOT in `SKILLS` is removed, so
+/// skills that have been deleted from GeoEngine do not linger in the agent's skills folder.
+///
+/// Returns the number of skills that were added, updated, or removed.
+fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
+    use crate::config::state;
 
-    // Collect skill names from the source directory (each subdirectory is one skill).
-    let skill_dirs: Vec<PathBuf> = std::fs::read_dir(source_skills_dir)?
-        .filter_map(|e| e.ok().map(|d| d.path()))
-        .filter(|p| p.is_dir())
-        .collect();
+    let mut changed = 0usize;
 
-    for skill_src in skill_dirs {
-        let skill_name = match skill_src.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
+    // --- 1. Upsert: write or overwrite skills that are new or stale ---
+    // Collect distinct skill names from the embedded set.
+    let mut skill_names: Vec<&str> = SKILLS.iter().map(|s| s.skill).collect();
+    skill_names.dedup(); // SKILLS is ordered, so adjacent duplicates == same skill
+    skill_names.sort_unstable();
+    skill_names.dedup(); // deduplicate after sort to be safe
 
-        // Skip hidden directories (e.g. .system inside Codex skills).
-        if skill_name.starts_with('.') {
-            continue;
-        }
-
-        let skill_dst = agent_skills_dir.join(&skill_name);
-
-        // Collect all files within this skill's source directory.
-        let src_files: Vec<PathBuf> = std::fs::read_dir(&skill_src)?
-            .filter_map(|e| e.ok().map(|d| d.path()))
-            .filter(|p| p.is_file())
+    for skill_name in &skill_names {
+        let skill_dst = agent_skills_dir.join(skill_name);
+        let skill_files: Vec<&SkillFile> = SKILLS.iter()
+            .filter(|s| s.skill == *skill_name)
             .collect();
 
-        let mut skill_needs_update = false;
+        let mut skill_needs_update = !skill_dst.exists();
 
-        if !skill_dst.exists() {
-            skill_needs_update = true;
-        } else {
-            for src_file in &src_files {
-                let file_name = match src_file.file_name() {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let dst_file = skill_dst.join(file_name);
-
-                let src_hash = file_sha256(src_file);
-                let dst_hash = if dst_file.exists() { file_sha256(&dst_file) } else { None };
-
-                if src_hash != dst_hash {
+        if !skill_needs_update {
+            for sf in &skill_files {
+                let dst_file = skill_dst.join(sf.file);
+                let up_to_date = std::fs::read_to_string(&dst_file)
+                    .map(|installed| state::sha256_string(&installed) == state::sha256_string(sf.content))
+                    .unwrap_or(false); // missing or unreadable → stale
+                if !up_to_date {
                     skill_needs_update = true;
                     break;
                 }
@@ -1132,49 +1123,37 @@ fn sync_skills_to_agent(source_skills_dir: &std::path::Path, agent_skills_dir: &
 
         if skill_needs_update {
             std::fs::create_dir_all(&skill_dst)?;
-            for src_file in &src_files {
-                if let Some(file_name) = src_file.file_name() {
-                    std::fs::copy(src_file, skill_dst.join(file_name))?;
-                }
+            for sf in &skill_files {
+                std::fs::write(skill_dst.join(sf.file), sf.content)?;
             }
-            updated += 1;
+            changed += 1;
         }
     }
 
-    Ok(updated)
-}
+    // --- 2. Prune: remove skill dirs that are no longer in the embedded set ---
+    if agent_skills_dir.exists() {
+        let installed_skill_dirs: Vec<PathBuf> = std::fs::read_dir(agent_skills_dir)?
+            .filter_map(|e| e.ok().map(|d| d.path()))
+            .filter(|p| p.is_dir())
+            .collect();
 
-/// Resolves the GeoEngine project's own `skills/` directory relative to the binary's location.
-/// Falls back to the current working directory if the binary path cannot be determined.
-fn get_geoengine_skills_dir() -> Result<PathBuf> {
-    // Walk up from the binary location to find the `skills/` directory.
-    // In development the binary sits in `target/debug/` or `target/release/`; in production it
-    // may be installed to `/usr/local/bin` or similar. We therefore also check the directory
-    // that the binary currently lives in and then fall back to the CWD.
-    let candidates: Vec<PathBuf> = {
-        let mut v = Vec::new();
-        if let Ok(exe) = std::env::current_exe() {
-            // e.g. target/debug/geoengine → try ../../skills
-            if let Some(parent) = exe.parent() {
-                v.push(parent.join("skills"));
-                if let Some(grandparent) = parent.parent() {
-                    v.push(grandparent.join("skills"));
-                    if let Some(great) = grandparent.parent() {
-                        v.push(great.join("skills"));
-                    }
-                }
+        for installed in installed_skill_dirs {
+            let dir_name = match installed.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            // Skip hidden directories (e.g. .system inside Codex skills).
+            if dir_name.starts_with('.') {
+                continue;
+            }
+            if !skill_names.contains(&dir_name.as_str()) {
+                std::fs::remove_dir_all(&installed)?;
+                changed += 1;
             }
         }
-        if let Ok(cwd) = std::env::current_dir() {
-            v.push(cwd.join("skills"));
-        }
-        v
-    };
+    }
 
-    candidates
-        .into_iter()
-        .find(|p| p.is_dir())
-        .ok_or_else(|| anyhow!("Could not locate the GeoEngine skills/ directory"))
+    Ok(changed)
 }
 
 /// Syncs GeoEngine skills into Claude's skills directory (`~/.claude/skills`).
@@ -1198,17 +1177,7 @@ fn v2_patch_claude_skills(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
         let agent_skills_dir = claude_dir.join("skills");
         std::fs::create_dir_all(&agent_skills_dir)?;
 
-        let source_skills_dir = match get_geoengine_skills_dir() {
-            Ok(d) => d,
-            Err(e) => {
-                let msg = format!("Could not locate GeoEngine skills/ directory: {}", e);
-                println!("  {} {}", "✗".red().bold(), msg);
-                ctx.issues.push(msg);
-                return Ok(());
-            }
-        };
-
-        match sync_skills_to_agent(&source_skills_dir, &agent_skills_dir) {
+        match sync_skills_to_agent(&agent_skills_dir) {
             Ok(0) => {
                 println!("  {} Claude skills up-to-date", "✓".green().bold());
             }
@@ -1253,17 +1222,7 @@ fn v2_patch_codex_skills(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
         let agent_skills_dir = codex_dir.join("skills");
         std::fs::create_dir_all(&agent_skills_dir)?;
 
-        let source_skills_dir = match get_geoengine_skills_dir() {
-            Ok(d) => d,
-            Err(e) => {
-                let msg = format!("Could not locate GeoEngine skills/ directory: {}", e);
-                println!("  {} {}", "✗".red().bold(), msg);
-                ctx.issues.push(msg);
-                return Ok(());
-            }
-        };
-
-        match sync_skills_to_agent(&source_skills_dir, &agent_skills_dir) {
+        match sync_skills_to_agent(&agent_skills_dir) {
             Ok(0) => {
                 println!("  {} Codex skills up-to-date", "✓".green().bold());
             }
