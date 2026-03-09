@@ -133,6 +133,10 @@ async fn update_via_shell() -> Result<()> {
         .await
         .context("Failed to run install.sh")?;
 
+    let _ = std::fs::remove_file(&tmp_archive);
+    let _ = std::fs::remove_file(&tmp_binary);
+    let _ = std::fs::remove_file(&tmp_script);
+
     if !status.success() {
         bail!("install.sh exited with non-zero status — update aborted");
     }
@@ -199,6 +203,10 @@ async fn update_via_powershell() -> Result<()> {
         .await
         .context("Failed to run install.ps1")?;
 
+    let _ = std::fs::remove_file(&tmp_archive);
+    let _ = std::fs::remove_file(&tmp_binary);
+    let _ = std::fs::remove_file(&tmp_script);
+
     if !status.success() {
         bail!("install.ps1 exited with non-zero status — update aborted");
     }
@@ -232,6 +240,16 @@ fn current_platform() -> Result<&'static str> {
 
 /// Download `checksums.txt` for `tag`, find the line for `archive_name`,
 /// and verify that the SHA256 of `data` matches.
+///
+/// # Trust model
+///
+/// Both the archive and `checksums.txt` are downloaded from the same GitHub
+/// release over HTTPS. This detects accidental corruption in transit or
+/// storage, but does **not** protect against a fully compromised release: an
+/// attacker who can push a malicious binary to the release page can also
+/// replace `checksums.txt` with matching hashes. The primary security
+/// guarantee here is transport integrity via HTTPS; the checksum file provides
+/// an additional layer for detecting bit-rot or partial downloads.
 async fn verify_checksum(data: &[u8], archive_name: &str, tag: &str) -> Result<()> {
     let checksums_url = format!(
         "https://github.com/NikaGeospatial/geoengine/releases/download/{}/checksums.txt",
@@ -265,6 +283,14 @@ async fn verify_checksum(data: &[u8], archive_name: &str, tag: &str) -> Result<(
             )
         })?;
 
+    if expected_hash.len() != 64 || !expected_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!(
+            "checksums.txt appears malformed — expected a 64-character hex hash for '{}', got '{}'",
+            archive_name,
+            expected_hash
+        );
+    }
+
     let actual_hash = format!("{:x}", Sha256::digest(data));
 
     if actual_hash != expected_hash {
@@ -293,8 +319,6 @@ fn write_temp_file(data: &[u8], prefix: &str, ext: &str) -> Result<std::path::Pa
 /// Extract the `geoengine` binary from a `.tar.gz` archive at `archive_path`
 /// and write it to a sibling temp file. Returns the path to the binary.
 fn extract_binary_from_tar(archive_path: &std::path::Path) -> Result<std::path::PathBuf> {
-    use std::io::Read;
-
     let file = std::fs::File::open(archive_path)
         .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
     let gz = flate2::read::GzDecoder::new(file);
@@ -310,10 +334,10 @@ fn extract_binary_from_tar(archive_path: &std::path::Path) -> Result<std::path::
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         if name == "geoengine" {
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).context("Failed to read binary from tar")?;
-            std::fs::write(&out_path, &buf)
-                .with_context(|| format!("Failed to write binary to {}", out_path.display()))?;
+            let mut out_file = std::fs::File::create(&out_path)
+                .with_context(|| format!("Failed to create {}", out_path.display()))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .context("Failed to extract binary from tar")?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -338,11 +362,17 @@ fn extract_binary_from_zip(archive_path: &std::path::Path) -> Result<std::path::
 
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).context("Failed to read zip entry")?;
-        if entry.name() == "geoengine.exe" {
-            let mut buf = Vec::new();
-            std::io::copy(&mut entry, &mut buf).context("Failed to read binary from zip")?;
-            std::fs::write(&out_path, &buf)
-                .with_context(|| format!("Failed to write binary to {}", out_path.display()))?;
+        // Use file_name() so entries stored as `./geoengine.exe` or inside a
+        // subdirectory are matched the same way as bare `geoengine.exe`.
+        let name = std::path::Path::new(entry.name())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name == "geoengine.exe" {
+            let mut out_file = std::fs::File::create(&out_path)
+                .with_context(|| format!("Failed to create {}", out_path.display()))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .context("Failed to extract binary from zip")?;
             return Ok(out_path);
         }
     }

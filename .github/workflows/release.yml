@@ -38,6 +38,10 @@ jobs:
             os: windows-latest
             name: geoengine-windows-x86_64
 
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            name: geoengine-windows-aarch64
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,13 +109,14 @@ jobs:
 
       - name: Generate checksums
         run: |
-          cd artifacts
-          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) \
-            | sort \
-            | xargs sha256sum \
-            | sed 's|\.\/[^/]*/||' \
-            > ../checksums.txt
-          cat ../checksums.txt
+          # Run sha256sum inside each artifact subdirectory so the output
+          # contains only the bare filename with no leading path components.
+          > checksums.txt
+          for dir in artifacts/*/; do
+            (cd "$dir" && sha256sum *) >> checksums.txt
+          done
+          sort -k2 checksums.txt -o checksums.txt
+          cat checksums.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
