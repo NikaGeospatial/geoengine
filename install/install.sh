@@ -137,7 +137,9 @@ download_binary() {
     success "GeoEngine installed to ${INSTALL_DIR}/${BINARY_NAME}"
 }
 
-# Install from local binary (offline mode)
+# Install from local binary (offline mode).
+# This `--local <path>` mode is also the contract used by the Rust CLI self-update
+# flow in `src/cli/update.rs`, so keep the flag and single-path argument stable.
 install_local() {
     local binary_path="$1"
 

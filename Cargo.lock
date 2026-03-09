@@ -837,6 +837,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "tar",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

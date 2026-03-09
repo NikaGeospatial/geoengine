@@ -4,6 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Response;
 use sha2::{Digest, Sha256};
 use std::process::Stdio;
+use tempfile::Builder;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -138,7 +139,18 @@ async fn update_via_powershell() -> Result<()> {
 }
 
 async fn update_via_script(kind: ScriptUpdateKind) -> Result<()> {
-    let tag = latest_release_tag().await?;
+    // Separate clients: tight total timeout for small metadata fetches; connection-only
+    // timeout for archive downloads so large binaries on slow links don't time out.
+    let meta_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            METADATA_REQUEST_TIMEOUT_SECS,
+        ))
+        .build()?;
+    let archive_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(ARCHIVE_CONNECT_TIMEOUT_SECS))
+        .build()?;
+
+    let tag = latest_release_tag(&meta_client).await?;
 
     let platform = current_platform()?;
     let archive_name = format!("geoengine-{}.{}", platform, kind.archive_ext());
@@ -151,15 +163,6 @@ async fn update_via_script(kind: ScriptUpdateKind) -> Result<()> {
         "{}",
         format!("==> Downloading {} @ {}", archive_name, tag).blue()
     );
-
-    // Separate clients: tight total timeout for small metadata fetches; connection-only
-    // timeout for archive downloads so large binaries on slow links don't time out.
-    let meta_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-    let archive_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .build()?;
 
     let expected_hash = fetch_expected_checksum(&archive_name, &tag, &meta_client).await?;
     let (archive_path, actual_hash) = download_to_temp_file(
@@ -214,6 +217,9 @@ async fn run_installer(
 ) -> Result<std::process::ExitStatus> {
     match kind {
         ScriptUpdateKind::Shell => {
+            // `install/install.sh`'s `--local <path>` mode is the shell self-update
+            // contract. The release archive bundles that script with the binary so
+            // the updater and installer stay in lockstep across releases.
             println!(
                 "{}",
                 format!(
@@ -315,45 +321,7 @@ async fn fetch_expected_checksum(
     let checksums_text =
         std::str::from_utf8(&checksums_text).context("checksums.txt is not valid UTF-8")?;
 
-    // Each line is either "<sha256>  <filename>" (sha256sum text mode)
-    // or "<sha256> *<filename>" (sha256sum binary mode). Split on the first
-    // run of whitespace and strip a leading '*' from the filename field.
-    let expected_hash = checksums_text
-        .lines()
-        .find_map(|line| {
-            let mut parts = line.splitn(2, "  ");
-            let (hash, name) = if let (Some(h), Some(n)) = (parts.next(), parts.next()) {
-                // Two-space separator (text mode).
-                (h.trim(), n.trim().trim_start_matches('*'))
-            } else {
-                // Fall back to single-space separator (binary mode: "<hash> *<name>").
-                let mut parts = line.splitn(2, ' ');
-                let h = parts.next()?.trim();
-                let n = parts.next()?.trim().trim_start_matches('*');
-                (h, n)
-            };
-            if name == archive_name {
-                Some(hash.to_owned())
-            } else {
-                None
-            }
-        })
-        .with_context(|| {
-            format!(
-                "No checksum entry found for '{}' in checksums.txt",
-                archive_name
-            )
-        })?;
-
-    if expected_hash.len() != 64 || !expected_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        bail!(
-            "checksums.txt appears malformed — expected a 64-character hex hash for '{}', got '{}'",
-            archive_name,
-            expected_hash
-        );
-    }
-
-    Ok(expected_hash)
+    expected_checksum_from_text(checksums_text, archive_name)
 }
 
 fn verify_checksum(archive_name: &str, expected_hash: &str, actual_hash: &str) -> Result<()> {
@@ -373,38 +341,69 @@ fn verify_checksum(archive_name: &str, expected_hash: &str, actual_hash: &str) -
     Ok(())
 }
 
+fn expected_checksum_from_text(checksums_text: &str, archive_name: &str) -> Result<String> {
+    let expected_hash = checksums_text
+        .lines()
+        .find_map(|line| {
+            let (hash, name) = parse_checksum_line(line)?;
+            (name == archive_name).then(|| hash.to_owned())
+        })
+        .with_context(|| {
+            format!(
+                "No checksum entry found for '{}' in checksums.txt",
+                archive_name
+            )
+        })?;
+
+    if expected_hash.len() != 64 || !expected_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!(
+            "checksums.txt appears malformed — expected a 64-character hex hash for '{}', got '{}'",
+            archive_name,
+            expected_hash
+        );
+    }
+
+    Ok(expected_hash)
+}
+
+fn parse_checksum_line(line: &str) -> Option<(&str, &str)> {
+    // sha256sum emits either "<hash>  <name>" (text mode) or "<hash> *<name>"
+    // (binary mode). Split once on the first run of whitespace and normalize
+    // away the optional binary marker.
+    let line = line.trim();
+    let separator_idx = line.find(|c: char| c.is_whitespace())?;
+    let (hash, remainder) = line.split_at(separator_idx);
+    let name = remainder.trim_start();
+    let stripped_name = name.strip_prefix('*').unwrap_or(name);
+
+    if hash.is_empty() || stripped_name.is_empty() {
+        return None;
+    }
+
+    Some((hash, stripped_name))
+}
+
 fn create_temp_file_blocking(
     prefix: &str,
     ext: Option<&str>,
 ) -> Result<(std::path::PathBuf, std::fs::File)> {
-    let dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-
-    for attempt in 0..10u32 {
-        let name = match ext {
-            Some(ext) => format!("{}_{}_{}_{}.{}", prefix, pid, now, attempt, ext),
-            None => format!("{}_{}_{}_{}", prefix, pid, now, attempt),
-        };
-        let path = dir.join(name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("Failed to create temp file {}", path.display()))
-            }
-        }
+    let mut builder = Builder::new();
+    builder.prefix(prefix);
+    let mut suffix = None;
+    if let Some(ext) = ext {
+        suffix = Some(format!(".{}", ext));
     }
-
-    bail!("Failed to create a unique temp file in {}", dir.display())
+    if let Some(suffix) = &suffix {
+        builder.suffix(suffix);
+    }
+    let named = builder
+        .tempfile()
+        .with_context(|| format!("Failed to create temp file with prefix '{}'", prefix))?;
+    let (file, path) = named
+        .keep()
+        .map_err(|err| err.error)
+        .context("Failed to persist temporary file path")?;
+    Ok((path, file))
 }
 
 fn cleanup_temp_pair(first: &std::path::Path, second: &std::path::Path) {
@@ -574,17 +573,16 @@ fn extract_from_zip(
 const GITHUB_API_LATEST: &str =
     "https://api.github.com/repos/NikaGeospatial/geoengine/releases/latest";
 const APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+const METADATA_REQUEST_TIMEOUT_SECS: u64 = 30;
+const ARCHIVE_CONNECT_TIMEOUT_SECS: u64 = 30;
+const ARCHIVE_IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// Return the tag name of the latest GitHub release (e.g. `"v0.4.3"`).
-async fn latest_release_tag() -> Result<String> {
+async fn latest_release_tag(client: &reqwest::Client) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct Release {
         tag_name: String,
     }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
 
     let release: Release = client
         .get(GITHUB_API_LATEST)
@@ -693,8 +691,6 @@ async fn stream_response_to_file(
     progress: &ProgressBar,
     url: &str,
 ) -> Result<()> {
-    const ARCHIVE_IDLE_TIMEOUT_SECS: u64 = 60;
-
     while let Some(chunk) = tokio::time::timeout(
         std::time::Duration::from_secs(ARCHIVE_IDLE_TIMEOUT_SECS),
         response.chunk(),
@@ -721,32 +717,13 @@ async fn create_temp_file(
     prefix: &str,
     ext: &str,
 ) -> Result<(std::path::PathBuf, tokio::fs::File)> {
-    let dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-
-    for attempt in 0..10u32 {
-        let name = format!("{}_{}_{}_{}.{}", prefix, pid, now, attempt, ext);
-        let path = dir.join(name);
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+    let prefix = prefix.to_owned();
+    let ext = ext.to_owned();
+    let (path, file) =
+        tokio::task::spawn_blocking(move || create_temp_file_blocking(&prefix, Some(&ext)))
             .await
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("Failed to create temp file {}", path.display()))
-            }
-        }
-    }
-
-    bail!("Failed to create a unique temp file in {}", dir.display())
+            .context("Temp file creation task panicked")??;
+    Ok((path, tokio::fs::File::from_std(file)))
 }
 
 /// Run a command, streaming its stdout/stderr to the terminal.
@@ -765,4 +742,85 @@ async fn run_command(program: &str, args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{create_temp_file_blocking, expected_checksum_from_text, parse_checksum_line};
+
+    const HASH_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const HASH_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn parse_checksum_line_supports_text_mode() {
+        assert_eq!(
+            parse_checksum_line(&format!("{HASH_A}  geoengine-linux-x86_64.tar.gz")),
+            Some((HASH_A, "geoengine-linux-x86_64.tar.gz"))
+        );
+    }
+
+    #[test]
+    fn parse_checksum_line_supports_binary_mode() {
+        assert_eq!(
+            parse_checksum_line(&format!("{HASH_A} *geoengine-windows-x86_64.zip")),
+            Some((HASH_A, "geoengine-windows-x86_64.zip"))
+        );
+    }
+
+    #[test]
+    fn parse_checksum_line_returns_none_for_empty_input() {
+        assert_eq!(parse_checksum_line(""), None);
+    }
+
+    #[test]
+    fn parse_checksum_line_returns_none_without_separator() {
+        assert_eq!(parse_checksum_line(HASH_A), None);
+    }
+
+    #[test]
+    fn parse_checksum_line_returns_none_for_empty_name_after_binary_marker() {
+        assert_eq!(parse_checksum_line(&format!("{HASH_A} *")), None);
+    }
+
+    #[test]
+    fn expected_checksum_from_text_returns_matching_hash() {
+        let checksums = format!(
+            "{HASH_A}  geoengine-linux-x86_64.tar.gz\n{HASH_B} *geoengine-windows-x86_64.zip\n"
+        );
+
+        let hash = expected_checksum_from_text(&checksums, "geoengine-windows-x86_64.zip")
+            .expect("expected archive entry should return its checksum");
+
+        assert_eq!(hash, HASH_B);
+    }
+
+    #[test]
+    fn expected_checksum_from_text_errors_when_archive_is_missing() {
+        let checksums = format!(
+            "{HASH_A}  geoengine-linux-x86_64.tar.gz\n{HASH_B} *geoengine-windows-x86_64.zip\n"
+        );
+
+        let err = expected_checksum_from_text(&checksums, "geoengine-darwin-aarch64.tar.gz")
+            .expect_err("missing archive should return an error");
+
+        assert!(err
+            .to_string()
+            .contains("No checksum entry found for 'geoengine-darwin-aarch64.tar.gz'"));
+    }
+
+    #[test]
+    fn create_temp_file_blocking_respects_prefix_and_suffix() {
+        let (path, file) = create_temp_file_blocking("geoengine_test", Some("sh"))
+            .expect("temp file should be created");
+        drop(file);
+
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("temp file name should be valid UTF-8");
+        assert!(name.starts_with("geoengine_test"));
+        assert!(name.ends_with(".sh"));
+
+        let _ = std::fs::remove_file(path);
+    }
 }

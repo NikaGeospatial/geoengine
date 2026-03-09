@@ -53,6 +53,7 @@ dotenvy = "0.15.7"
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tempfile = "3"
 
 [profile.release]
 lto = true
