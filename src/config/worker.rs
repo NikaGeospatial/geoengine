@@ -1,7 +1,7 @@
+use crate::config::state;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use crate::config::state;
 
 /// Worker configuration loaded from geoengine.yaml
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,9 +192,7 @@ impl WorkerConfig {
                 arcgis: Some(false),
                 qgis: Some(false),
             }),
-            deploy: Some(DeployConfig {
-                tenant_id: None,
-            }),
+            deploy: Some(DeployConfig { tenant_id: None }),
         }
     }
 }

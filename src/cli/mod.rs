@@ -2,13 +2,13 @@ pub mod deploy;
 pub mod image;
 pub mod patch;
 pub mod plugins;
+pub mod settings;
 pub mod update;
 pub mod worker;
-pub mod settings;
 
+use crate::utils::geoengine::check_for_update;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crate::utils::geoengine::check_for_update;
 
 #[derive(Parser)]
 #[command(name = "geoengine")]
@@ -84,7 +84,7 @@ enum Commands {
         /// Emit structured JSON result to stdout (logs go to stderr)
         #[arg(long)]
         json: bool,
-        
+
         /// Runs the latest dev version of the worker
         #[arg(long)]
         dev: bool,
@@ -104,12 +104,12 @@ enum Commands {
         #[arg(long)]
         gis: Option<String>,
     },
-    
+
     /// Describe a specific worker
     Describe {
         /// Worker name (defaults to current directory's worker)
         worker: Option<String>,
-        
+
         /// Output as JSON (for programmatic use)
         #[arg(long)]
         json: bool,
@@ -142,7 +142,7 @@ enum Commands {
     Env {
         #[command(subcommand)]
         command: settings::EnvCommands,
-    }
+    },
 }
 
 impl Cli {
@@ -165,9 +165,7 @@ impl Cli {
                 dev,
                 build_arg,
             } => worker::build_worker_local(no_cache, dev, &build_arg, verbose).await,
-            Commands::Apply { worker } => {
-                worker::apply_worker(worker.as_deref(), false).await
-            }
+            Commands::Apply { worker } => worker::apply_worker(worker.as_deref(), false).await,
             Commands::Delete { name } => worker::delete_worker(name.as_deref()).await,
             Commands::Run {
                 worker,
@@ -177,7 +175,9 @@ impl Cli {
                 args,
             } => worker::run_worker(worker.as_deref(), &inputs, json, dev, &args).await,
             Commands::Workers { json, gis } => worker::list_workers(json, gis).await,
-            Commands::Describe { worker, json } => worker::describe_worker(worker.as_deref(), json).await,
+            Commands::Describe { worker, json } => {
+                worker::describe_worker(worker.as_deref(), json).await
+            }
             Commands::Diff { file } => worker::diff_worker(file.as_deref()).await,
             Commands::Deploy { command } => command.execute().await,
             Commands::Patch => patch::patch_all_v2().await,

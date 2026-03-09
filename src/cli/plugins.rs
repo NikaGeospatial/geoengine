@@ -49,10 +49,7 @@ pub async fn register_arcgis(custom_path: Option<PathBuf>) -> Result<()> {
 
 /// Install the GeoEngine plugin into QGIS's plugin directory.
 pub async fn register_qgis(custom_path: Option<PathBuf>) -> Result<()> {
-    println!(
-        "{} Registering GeoEngine with QGIS...",
-        "=>".blue().bold()
-    );
+    println!("{} Registering GeoEngine with QGIS...", "=>".blue().bold());
 
     let plugin_dir = if let Some(path) = custom_path {
         path
@@ -74,13 +71,16 @@ pub async fn register_qgis(custom_path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-
 fn missing_files(base: &PathBuf, required: &[&str]) -> Vec<String> {
     required
         .iter()
         .filter_map(|f| {
             let p = base.join(f);
-            if p.exists() { None } else { Some((*f).to_string()) }
+            if p.exists() {
+                None
+            } else {
+                Some((*f).to_string())
+            }
         })
         .collect()
 }
@@ -88,7 +88,8 @@ fn missing_files(base: &PathBuf, required: &[&str]) -> Vec<String> {
 /// Check if the GeoEngine plugin is installed in the ArcGIS Pro toolbox directory.
 pub fn verify_arcgis_plugin_installed() -> Result<bool> {
     let arcgis_dir = find_arcgis_toolbox_dir()?;
-    let required: Vec<&str> = PLUGIN_FILES.iter()
+    let required: Vec<&str> = PLUGIN_FILES
+        .iter()
         .filter(|pf| pf.plugin == ARCGIS_GE_PLUGIN)
         .map(|pf| pf.file)
         .collect();
@@ -98,7 +99,8 @@ pub fn verify_arcgis_plugin_installed() -> Result<bool> {
 /// Check if the GeoEngine plugin is installed in the QGIS plugin directory.
 pub fn verify_qgis_plugin_installed() -> Result<bool> {
     let qgis_dir = find_qgis_plugin_dir()?.join("geoengine");
-    let required: Vec<&str> = PLUGIN_FILES.iter()
+    let required: Vec<&str> = PLUGIN_FILES
+        .iter()
         .filter(|pf| pf.plugin == QGIS_GE_PLUGIN)
         .map(|pf| pf.file)
         .collect();
@@ -117,7 +119,6 @@ pub enum PluginPatchResult {
     Failed(anyhow::Error),
 }
 
-
 /// Check the installed QGIS plugin against the canonical embedded files and reinstall
 /// if any file is missing or has a different hash. If QGIS is not installed on this
 /// machine (parent directory absent), returns `PluginPatchResult::NotInstalled`.
@@ -134,7 +135,8 @@ pub async fn patch_qgis() -> Result<PluginPatchResult> {
 
     let geoengine_dir = plugin_dir.join("geoengine");
 
-    let canonical: Vec<&PluginFile> = PLUGIN_FILES.iter()
+    let canonical: Vec<&PluginFile> = PLUGIN_FILES
+        .iter()
         .filter(|pf| pf.plugin == QGIS_GE_PLUGIN)
         .collect();
 
@@ -181,7 +183,8 @@ pub async fn patch_arcgis() -> Result<PluginPatchResult> {
         return Ok(PluginPatchResult::NotInstalled);
     }
 
-    let canonical: Vec<&PluginFile> = PLUGIN_FILES.iter()
+    let canonical: Vec<&PluginFile> = PLUGIN_FILES
+        .iter()
         .filter(|pf| pf.plugin == ARCGIS_GE_PLUGIN)
         .collect();
 

@@ -1,10 +1,10 @@
+use crate::config::settings::Settings;
 use anyhow::Result;
-use std::path::PathBuf;
 use clap::Subcommand;
 use colored::Colorize;
-use regex::Regex;
 use dotenvy::from_path_iter;
-use crate::config::settings::Settings;
+use regex::Regex;
+use std::path::PathBuf;
 
 /// Custom parser that splits a string on the first `=`
 fn parse_key_val(s: &str) -> Result<(String, String)> {
@@ -14,16 +14,20 @@ fn parse_key_val(s: &str) -> Result<(String, String)> {
         Some((key, value)) => {
             // Ensures that there are no trailing/leading whitespaces for key and value
             if key.trim() != key || value.trim() != value {
-                return Err(anyhow::anyhow!("{}{}{}",
+                return Err(anyhow::anyhow!(
+                    "{}{}{}",
                     "Invalid format: ".to_string().yellow(),
                     s.yellow().italic(),
-                    " should not have whitespaces around '='".to_string().yellow(),
+                    " should not have whitespaces around '='"
+                        .to_string()
+                        .yellow(),
                 ));
             }
 
             // Ensures no whitespace in key
             if key.trim().contains(char::is_whitespace) {
-                return Err(anyhow::anyhow!("{}{}{}",
+                return Err(anyhow::anyhow!(
+                    "{}{}{}",
                     "Invalid format: key ".to_string().yellow(),
                     key.yellow().italic(),
                     " contains whitespace.".to_string().yellow(),
@@ -31,7 +35,8 @@ fn parse_key_val(s: &str) -> Result<(String, String)> {
             }
             // Ensures key is ascii
             if !key.trim().is_ascii() {
-                return Err(anyhow::anyhow!("{}{}{}",
+                return Err(anyhow::anyhow!(
+                    "{}{}{}",
                     "Invalid format: key ".to_string().yellow(),
                     key.yellow().italic(),
                     " contains illegal characters.".to_string().yellow(),
@@ -41,20 +46,24 @@ fn parse_key_val(s: &str) -> Result<(String, String)> {
             let quote_checker = Regex::new(r#"^(".*"|'.*')$"#)?;
             // Ensures no whitespace in value if not contained in quotes
             if value.contains(char::is_whitespace) && !quote_checker.is_match(value) {
-                return Err(anyhow::anyhow!("{}",
-                    "Invalid format: values with whitespace must be contained in quotes".to_string().yellow()
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    "Invalid format: values with whitespace must be contained in quotes"
+                        .to_string()
+                        .yellow()
                 ));
             }
 
             // This strips outer double quotes and single quotes from the value
             let clean_value = value.trim_matches('"').trim_matches('\'');
             Ok((key.to_string(), clean_value.to_string()))
-        },
-        None => Err(anyhow::anyhow!("{}{}{}",
-                    "Invalid format: ".to_string().yellow(),
-                    s.yellow().italic(),
-                    " must be in KEY=VALUE format.".to_string().yellow(),
-                )),
+        }
+        None => Err(anyhow::anyhow!(
+            "{}{}{}",
+            "Invalid format: ".to_string().yellow(),
+            s.yellow().italic(),
+            " must be in KEY=VALUE format.".to_string().yellow(),
+        )),
     }
 }
 
@@ -132,8 +141,9 @@ async fn unset_env_var(keys: Vec<String>) -> Result<()> {
     let mut settings = Settings::load()?;
     for key in keys {
         match settings.remove_env(key.as_ref()) {
-            Ok(_) => {},
-            Err(e) => println!("{}{}",
+            Ok(_) => {}
+            Err(e) => println!(
+                "{}{}",
                 e.to_string().yellow(),
                 ", skipped.".to_string().yellow(),
             ),
@@ -152,18 +162,21 @@ async fn list_env_vars() -> Result<()> {
             let key_m = env.keys().map(|k| k.chars().count()).max();
             let val_m = env.values().map(|v| v.chars().count()).max();
             println!();
-            println!("{:<w1$} {:<w2$}",
-                     "KEY".bold(),
-                     "VALUE".bold(),
-                     w1 = key_m.unwrap_or(3) + 1,
-                     w2 = val_m.unwrap_or(5)
+            println!(
+                "{:<w1$} {:<w2$}",
+                "KEY".bold(),
+                "VALUE".bold(),
+                w1 = key_m.unwrap_or(3) + 1,
+                w2 = val_m.unwrap_or(5)
             );
-            println!("{}-{}",
-                     "-".repeat(key_m.unwrap_or(3) + 1),
-                     "-".repeat(val_m.unwrap_or(5))
+            println!(
+                "{}-{}",
+                "-".repeat(key_m.unwrap_or(3) + 1),
+                "-".repeat(val_m.unwrap_or(5))
             );
             for (key, value) in env {
-                println!("{:<w1$} {:<w2$}",
+                println!(
+                    "{:<w1$} {:<w2$}",
                     key,
                     value,
                     w1 = key_m.unwrap_or(3) + 1,
@@ -171,7 +184,7 @@ async fn list_env_vars() -> Result<()> {
                 );
             }
             println!();
-        },
+        }
     }
     Ok(())
 }
@@ -180,7 +193,8 @@ async fn show_env_var(key: &str) -> Result<()> {
     let settings = Settings::load()?;
     let env = settings.get_env(key);
     match env {
-        None => println!("{}{}{}",
+        None => println!(
+            "{}{}{}",
             "Environment variable ".yellow(),
             key.yellow().italic(),
             " not found.".yellow()

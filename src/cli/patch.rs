@@ -7,7 +7,7 @@ use crate::config::settings::Settings;
 use crate::config::state;
 use crate::config::worker::WorkerConfig;
 use crate::config::yaml_store;
-use crate::docker::{dockerfile};
+use crate::docker::dockerfile;
 use crate::utils::paths;
 
 fn print_summary(
@@ -32,33 +32,31 @@ fn print_summary(
         issue_count,
         if issue_count == 1 { "" } else { "s" },
     );
-    if dockerfiles_updated > 0 ||
-        plugins_updated > 0 ||
-        skills_updated > 0 ||
-        issue_count > 0 {
+    if dockerfiles_updated > 0 || plugins_updated > 0 || skills_updated > 0 || issue_count > 0 {
         println!();
         println!("{}", "TO-DOs:".bold());
         if issue_count > 0 {
-            println!("  {} Fix worker issues above.",
-                "✗".red().bold()
-            )
+            println!("  {} Fix worker issues above.", "✗".red().bold())
         }
         if dockerfiles_updated > 0 {
-            println!("  {} Rebuild worker{} with updated Dockerfile{}.",
+            println!(
+                "  {} Rebuild worker{} with updated Dockerfile{}.",
                 "!".yellow().bold(),
                 if dockerfiles_updated == 1 { "" } else { "s" },
                 if dockerfiles_updated == 1 { "" } else { "s" },
             )
         }
         if plugins_updated > 0 {
-            println!("  {} Restart updated GIS platform{} to get latest plugin{}.",
+            println!(
+                "  {} Restart updated GIS platform{} to get latest plugin{}.",
                 "!".yellow().bold(),
                 if plugins_updated == 1 { "" } else { "s" },
                 if plugins_updated == 1 { "" } else { "s" },
             )
         }
         if skills_updated > 0 {
-            println!("  {} Restart agents to get latest skill{}.",
+            println!(
+                "  {} Restart agents to get latest skill{}.",
                 "!".yellow().bold(),
                 if skills_updated == 1 { "" } else { "s" },
             )
@@ -66,11 +64,11 @@ fn print_summary(
     }
 }
 
+use crate::docker::client::DockerClient;
+use crate::utils::versioning::get_latest_worker_version;
 use anyhow::anyhow;
 use futures::future::BoxFuture;
 use std::path::Path;
-use crate::docker::client::DockerClient;
-use crate::utils::versioning::get_latest_worker_version;
 
 // =================================================================================================
 //                                      STAGE FUNCTION DEFINITIONS
@@ -250,9 +248,7 @@ async fn v2_run_skills_checks(ctx: &mut PatchV2Ctx) -> Result<()> {
 // =================================================================================================
 
 /// Check global GeoEngine-related settings.
-const V2_GLOBAL_CHECKS: &[V2GlobalCheckFn] = &[
-    v2_load_settings,
-];
+const V2_GLOBAL_CHECKS: &[V2GlobalCheckFn] = &[v2_load_settings];
 
 /// Check worker-specific states.
 const V2_STATE_CHECKS: &[V2StateCheckFn] = &[
@@ -262,10 +258,7 @@ const V2_STATE_CHECKS: &[V2StateCheckFn] = &[
 ];
 
 /// Check worker-specific configuration save files (saved geoengine.yaml).
-const V2_CONFIG_CHECKS: &[V2ConfigCheckFn] = &[
-    v2_validate_config_parse,
-    v2_validate_config_orphan,
-];
+const V2_CONFIG_CHECKS: &[V2ConfigCheckFn] = &[v2_validate_config_parse, v2_validate_config_orphan];
 
 /// Check worker-specific artifacts.
 const V2_WORKER_CHECKS: &[V2WorkerCheckFn] = &[
@@ -289,7 +282,10 @@ pub async fn patch_all_v2() -> Result<()> {
     let mut ctx = PatchV2Ctx::new();
 
     println!("{}", "Checking global artifacts...".bold());
-    if matches!(v2_run_global_checks(&mut ctx).await?, V2PatchFlow::AbortPatch) {
+    if matches!(
+        v2_run_global_checks(&mut ctx).await?,
+        V2PatchFlow::AbortPatch
+    ) {
         return Ok(());
     }
 
@@ -400,7 +396,13 @@ fn v2_load_settings(ctx: &'_ mut PatchV2Ctx) -> BoxFuture<'_, Result<V2PatchFlow
                 let msg = format!("settings.yaml failed to parse: {}", e);
                 println!("  {} {}", "✗".red().bold(), msg);
                 ctx.issues.push(msg);
-                print_summary(ctx.workers_checked, ctx.dockerfiles_updated, 0, 0, &ctx.issues);
+                print_summary(
+                    ctx.workers_checked,
+                    ctx.dockerfiles_updated,
+                    0,
+                    0,
+                    &ctx.issues,
+                );
                 Ok(V2PatchFlow::AbortPatch)
             }
         }
@@ -453,17 +455,14 @@ fn v2_remove_state_image_tag_no_dev<'a>(
     stem: &'a str,
     worker_state: &'a mut state::WorkerState,
 ) -> BoxFuture<'a, Result<V2StateFlow>> {
-    Box::pin(async move{
+    Box::pin(async move {
         let image_tag = worker_state.image_tag.as_ref();
         if image_tag.is_some_and(|t| t.as_str().contains("dev")) {
             let mut updated_image_tag = false;
             match DockerClient::new().await {
                 Ok(docker) => {
-                    let latest_built_ver = get_latest_worker_version(
-                        worker_state.worker_name.as_ref(),
-                        &docker,
-                    )
-                    .await;
+                    let latest_built_ver =
+                        get_latest_worker_version(worker_state.worker_name.as_ref(), &docker).await;
 
                     if let Some(version) = latest_built_ver {
                         worker_state.image_tag = Some(version);
@@ -558,7 +557,11 @@ fn v2_validate_worker_path<'a>(
                 name,
                 worker_path.display()
             );
-            println!("    {} Path not found: {}", "✗".red().bold(), worker_path.display());
+            println!(
+                "    {} Path not found: {}",
+                "✗".red().bold(),
+                worker_path.display()
+            );
             ctx.issues.push(msg);
             return Ok(V2WorkerFlow::SkipWorker);
         }
@@ -660,15 +663,16 @@ fn v2_patch_worker_docker_artifacts<'a>(
                 }
                 Err(e) => {
                     let msg = format!("worker '{}' Dockerfile regeneration failed: {}", name, e);
-                    println!("    {} Dockerfile regeneration failed: {}", "✗".red().bold(), e);
+                    println!(
+                        "    {} Dockerfile regeneration failed: {}",
+                        "✗".red().bold(),
+                        e
+                    );
                     ctx.issues.push(msg);
                 }
             }
         } else {
-            println!(
-                "    {} Dockerfile and .dockerignore up-to-date",
-                "•".cyan()
-            );
+            println!("    {} Dockerfile and .dockerignore up-to-date", "•".cyan());
         }
 
         Ok(V2WorkerFlow::Continue)
@@ -685,14 +689,20 @@ fn v2_patch_qgis_stage(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
     Box::pin(async move {
         match plugins::patch_qgis().await {
             Ok(PluginPatchResult::NotInstalled) => {
-                println!("  {} QGIS not installed on this machine — skipping", "•".cyan());
+                println!(
+                    "  {} QGIS not installed on this machine — skipping",
+                    "•".cyan()
+                );
             }
             Ok(PluginPatchResult::UpToDate) => {
                 println!("  {} QGIS plugin up-to-date", "✓".green().bold());
             }
             Ok(PluginPatchResult::Updated) => {
                 ctx.plugins_updated += 1;
-                println!("  {} QGIS plugin reinstalled (files were stale)", "✓".green().bold());
+                println!(
+                    "  {} QGIS plugin reinstalled (files were stale)",
+                    "✓".green().bold()
+                );
             }
             Ok(PluginPatchResult::Failed(e)) => {
                 let msg = format!("QGIS plugin reinstall failed: {}", e);
@@ -715,7 +725,10 @@ fn v2_patch_arcgis_stage(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
     Box::pin(async move {
         match plugins::patch_arcgis().await {
             Ok(PluginPatchResult::NotInstalled) => {
-                println!("  {} ArcGIS not installed on this machine — skipping", "•".cyan());
+                println!(
+                    "  {} ArcGIS not installed on this machine — skipping",
+                    "•".cyan()
+                );
             }
             Ok(PluginPatchResult::UpToDate) => {
                 println!("  {} ArcGIS plugin up-to-date", "✓".green().bold());
@@ -907,8 +920,8 @@ fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
             if dir_name.starts_with('.') {
                 continue;
             }
-            let is_geoengine_managed = previously_managed.contains(&dir_name)
-                || dir_name.starts_with("geoengine-");
+            let is_geoengine_managed =
+                previously_managed.contains(&dir_name) || dir_name.starts_with("geoengine-");
             if !is_geoengine_managed {
                 continue;
             }
@@ -937,14 +950,20 @@ fn v2_patch_claude_skills(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => {
-                println!("  {} Could not determine home directory — skipping Claude skills", "•".cyan());
+                println!(
+                    "  {} Could not determine home directory — skipping Claude skills",
+                    "•".cyan()
+                );
                 return Ok(());
             }
         };
 
         let claude_dir = home.join(".claude");
         if !claude_dir.exists() {
-            println!("  {} Claude not installed on this machine — skipping", "•".cyan());
+            println!(
+                "  {} Claude not installed on this machine — skipping",
+                "•".cyan()
+            );
             return Ok(());
         }
 
@@ -982,14 +1001,20 @@ fn v2_patch_codex_skills(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => {
-                println!("  {} Could not determine home directory — skipping Codex skills", "•".cyan());
+                println!(
+                    "  {} Could not determine home directory — skipping Codex skills",
+                    "•".cyan()
+                );
                 return Ok(());
             }
         };
 
         let codex_dir = home.join(".codex");
         if !codex_dir.exists() {
-            println!("  {} Codex not installed on this machine — skipping", "•".cyan());
+            println!(
+                "  {} Codex not installed on this machine — skipping",
+                "•".cyan()
+            );
             return Ok(());
         }
 

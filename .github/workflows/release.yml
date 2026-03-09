@@ -38,6 +38,10 @@ jobs:
             os: windows-latest
             name: geoengine-windows-x86_64
 
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            name: geoengine-windows-aarch64
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,14 +67,16 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czvf ../../../${{ matrix.name }}.tar.gz geoengine
+          cp "${{ github.workspace }}/install/install.sh" .
+          tar -czvf ../../../${{ matrix.name }}.tar.gz geoengine install.sh
           cd ../../..
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path geoengine.exe -DestinationPath ../../../${{ matrix.name }}.zip
+          Copy-Item "$env:GITHUB_WORKSPACE\install\install.ps1" .
+          Compress-Archive -Path geoengine.exe,install.ps1 -DestinationPath ../../../${{ matrix.name }}.zip
           cd ../../..
 
       - name: Upload artifact (Unix)
@@ -103,12 +109,38 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Run sha256sum inside each artifact subdirectory so the output
+          # contains only the bare filename with no leading path components.
+          # Explicitly match only .tar.gz and .zip to avoid hashing unexpected files.
+          : > checksums.txt
+          for dir in artifacts/*/; do
+            (
+              cd "$dir"
+              files=( *.tar.gz *.zip )
+              if (( ${#files[@]} > 0 )); then
+                sha256sum "${files[@]}"
+              fi
+            ) >> checksums.txt
+          done
+          if [[ ! -s checksums.txt ]]; then
+            echo "ERROR: checksums.txt is empty; no release archives were found" >&2
+            exit 1
+          fi
+          sort -k2 checksums.txt -o checksums.txt
+          cat checksums.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
+            checksums.txt
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}

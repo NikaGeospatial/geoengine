@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
-use std::path::PathBuf;
 use crate::config::state;
 use crate::config::worker::WorkerConfig;
 use crate::utils::paths;
+use anyhow::{Context, Result};
+use std::path::PathBuf;
 
 /// Get the directory for saved worker configs (~/.geoengine/configs)
 fn get_configs_dir() -> Result<PathBuf> {
@@ -60,6 +60,10 @@ pub fn delete_saved_config(worker_name: &str) -> Result<()> {
 /// Rename a saved config file from old_name to new_name.
 /// Returns Ok(()) even if no saved config exists for old_name (nothing to migrate).
 pub fn rename_saved_config(old_name: &str, new_name: &str) -> Result<()> {
+    if old_name == new_name {
+        return Ok(());
+    }
+
     let old_path = config_path(old_name)?;
     let new_path = config_path(new_name)?;
 
@@ -74,8 +78,9 @@ pub fn rename_saved_config(old_name: &str, new_name: &str) -> Result<()> {
             .context("Failed to serialize worker config to JSON")?;
         std::fs::write(&new_path, json)
             .with_context(|| format!("Failed to write saved config: {}", new_path.display()))?;
-        std::fs::remove_file(&old_path)
-            .with_context(|| format!("Failed to remove old saved config: {}", old_path.display()))?;
+        std::fs::remove_file(&old_path).with_context(|| {
+            format!("Failed to remove old saved config: {}", old_path.display())
+        })?;
     }
     Ok(())
 }
@@ -88,7 +93,7 @@ pub fn check_changed_config(worker_name: &str, worker_path: &PathBuf) -> Result<
             let old_hash = s.yaml_hash.unwrap_or("".to_string());
             let new_hash = state::compute_file_hash(&worker_path.join("geoengine.yaml"))?;
             Ok(old_hash != new_hash)
-        },
-        None => Ok(true)
+        }
+        None => Ok(true),
     }
 }

@@ -105,7 +105,13 @@ async fn configure_auth(project: Option<&str>) -> Result<()> {
     )?;
 
     // Run gcloud auth configure-docker
-    let regions = ["us-central1", "us-east1", "us-west1", "europe-west1", "asia-east1"];
+    let regions = [
+        "us-central1",
+        "us-east1",
+        "us-west1",
+        "europe-west1",
+        "asia-east1",
+    ];
     let registries: Vec<String> = regions
         .iter()
         .map(|r| format!("{}-docker.pkg.dev", r))
@@ -143,7 +149,10 @@ async fn configure_auth(project: Option<&str>) -> Result<()> {
     }
 
     println!("\nYou can now push images with:");
-    println!("  {}", "geoengine deploy push <image> --project <gcp-project>".cyan());
+    println!(
+        "  {}",
+        "geoengine deploy push <image> --project <gcp-project>".cyan()
+    );
 
     Ok(())
 }
@@ -158,9 +167,7 @@ async fn push_image(
     let client = DockerClient::new().await?;
 
     // Build the full GCP Artifact Registry path
-    let remote_tag = tag.unwrap_or_else(|| {
-        image.split(':').last().unwrap_or("latest")
-    });
+    let remote_tag = tag.unwrap_or_else(|| image.split(':').last().unwrap_or("latest"));
     let image_name = image.split(':').next().unwrap_or(image);
     let remote_image = format!(
         "{}-docker.pkg.dev/{}/{}/{}:{}",
@@ -207,11 +214,7 @@ async fn pull_image(image: &str, project: &str, region: &str, repository: &str) 
         region, project, repository, image
     );
 
-    println!(
-        "{} Pulling {}...",
-        "=>".blue().bold(),
-        remote_image.cyan()
-    );
+    println!("{} Pulling {}...", "=>".blue().bold(), remote_image.cyan());
 
     let pb = ProgressBar::new_spinner();
     pb.set_style(

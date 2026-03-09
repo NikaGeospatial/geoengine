@@ -66,7 +66,9 @@ pub async fn check_for_update() -> Result<()> {
             " → ".yellow().italic(),
             "v".yellow().bold().italic(),
             latest.yellow().bold().italic(),
-            "   Please update GeoEngine to the latest version!".yellow().italic()
+            "   Please update GeoEngine to the latest version!"
+                .yellow()
+                .italic()
         );
     }
 
