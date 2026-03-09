@@ -7,7 +7,7 @@ use crate::cli::patch;
 
 pub async fn update_geoengine() -> Result<()> {
     // --- 1. Detect installation method ---
-    let method = detect_install_method();
+    let method = detect_install_method().await;
     println!("{}", format!("Detected install method: {}", method.label()).cyan());
 
     // --- 2. Run the update ---
@@ -40,15 +40,15 @@ impl InstallMethod {
     }
 }
 
-fn detect_install_method() -> InstallMethod {
+async fn detect_install_method() -> InstallMethod {
     if cfg!(target_os = "macos") {
         // macOS: prefer Homebrew if `brew` exists AND `brew list --formula geoengine` succeeds
         if which::which("brew").is_ok()
-            && std::process::Command::new("brew")
+            && Command::new("brew")
                 .args(["list", "--formula", "geoengine"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status()
+                .status().await
                 .map(|s| s.success())
                 .unwrap_or(false)
         {

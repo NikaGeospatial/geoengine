@@ -786,17 +786,45 @@ fn skill_directory_hash(entry: &SkillEntry) -> String {
 
 /// Computes the same hash for the on-disk version of a skill directory.
 ///
-/// Reads every file listed in `entry.files` from `skill_dst` (relative paths
-/// preserved).  Returns `None` if any file is missing or unreadable — the caller
-/// treats that as stale.
-fn installed_skill_hash(entry: &SkillEntry, skill_dst: &std::path::Path) -> Option<String> {
+/// Walks `skill_dst` recursively and hashes every file's relative path and
+/// content in sorted path order. Returns `None` if the directory is missing or
+/// any entry is unreadable/non-UTF8/non-regular-file.
+fn installed_skill_hash(skill_dst: &std::path::Path) -> Option<String> {
     use crate::config::state;
+    if !skill_dst.is_dir() {
+        return None;
+    }
+
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut pending_dirs = vec![skill_dst.to_path_buf()];
+
+    while let Some(dir) = pending_dirs.pop() {
+        for dir_entry in std::fs::read_dir(&dir).ok()? {
+            let dir_entry = dir_entry.ok()?;
+            let path = dir_entry.path();
+            let file_type = dir_entry.file_type().ok()?;
+            if file_type.is_dir() {
+                pending_dirs.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                return None;
+            }
+
+            let rel_path = path.strip_prefix(skill_dst).ok()?;
+            let rel_path = rel_path.to_str()?.replace('\\', "/");
+            let content = std::fs::read_to_string(path).ok()?;
+            files.push((rel_path, content));
+        }
+    }
+
+    files.sort_by(|(a, _), (b, _)| a.cmp(b));
+
     let mut combined = String::new();
-    for (rel_path, _) in entry.files {
-        let content = std::fs::read_to_string(skill_dst.join(rel_path)).ok()?;
-        combined.push_str(rel_path);
+    for (rel_path, content) in files {
+        combined.push_str(&rel_path);
         combined.push('\0');
-        combined.push_str(&content);
+        combined.push_str(content.as_str());
         combined.push('\0');
     }
     Some(state::sha256_string(&combined))
@@ -838,11 +866,19 @@ fn sync_skills_to_agent(agent_skills_dir: &std::path::Path) -> Result<usize> {
         let skill_dst = agent_skills_dir.join(entry.skill);
 
         let canonical_hash = skill_directory_hash(entry);
-        let installed_hash = installed_skill_hash(entry, &skill_dst);
+        let installed_hash = installed_skill_hash(&skill_dst);
 
         let needs_update = installed_hash.as_deref() != Some(canonical_hash.as_str());
 
         if needs_update {
+            if let Ok(metadata) = std::fs::symlink_metadata(&skill_dst) {
+                if metadata.is_dir() {
+                    std::fs::remove_dir_all(&skill_dst)?;
+                } else {
+                    std::fs::remove_file(&skill_dst)?;
+                }
+            }
+
             // Write every file, creating intermediate subdirectories as needed.
             for (rel_path, content) in entry.files {
                 let dst = skill_dst.join(rel_path);
