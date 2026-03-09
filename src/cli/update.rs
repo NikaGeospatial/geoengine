@@ -4,6 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Response;
 use sha2::{Digest, Sha256};
 use std::process::Stdio;
+use tempfile::Builder;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -382,52 +383,27 @@ fn parse_checksum_line(line: &str) -> Option<(&str, &str)> {
     Some((hash, stripped_name))
 }
 
-fn temp_file_name_stem(prefix: &str) -> String {
-    let pid = std::process::id();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}_{}_{}", prefix, pid, now)
-}
-
-fn temp_file_candidate_path(
-    dir: &std::path::Path,
-    stem: &str,
-    ext: Option<&str>,
-    attempt: u32,
-) -> std::path::PathBuf {
-    let name = match ext {
-        Some(ext) => format!("{}_{}.{}", stem, attempt, ext),
-        None => format!("{}_{}", stem, attempt),
-    };
-    dir.join(name)
-}
-
 fn create_temp_file_blocking(
     prefix: &str,
     ext: Option<&str>,
 ) -> Result<(std::path::PathBuf, std::fs::File)> {
-    let dir = std::env::temp_dir();
-    let stem = temp_file_name_stem(prefix);
-
-    for attempt in 0..10u32 {
-        let path = temp_file_candidate_path(&dir, &stem, ext, attempt);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("Failed to create temp file {}", path.display()))
-            }
-        }
+    let mut builder = Builder::new();
+    builder.prefix(prefix);
+    let mut suffix = None;
+    if let Some(ext) = ext {
+        suffix = Some(format!(".{}", ext));
     }
-
-    bail!("Failed to create a unique temp file in {}", dir.display())
+    if let Some(suffix) = &suffix {
+        builder.suffix(suffix);
+    }
+    let named = builder
+        .tempfile()
+        .with_context(|| format!("Failed to create temp file with prefix '{}'", prefix))?;
+    let (file, path) = named
+        .keep()
+        .map_err(|err| err.error)
+        .context("Failed to persist temporary file path")?;
+    Ok((path, file))
 }
 
 fn cleanup_temp_pair(first: &std::path::Path, second: &std::path::Path) {
@@ -741,27 +717,13 @@ async fn create_temp_file(
     prefix: &str,
     ext: &str,
 ) -> Result<(std::path::PathBuf, tokio::fs::File)> {
-    let dir = std::env::temp_dir();
-    let stem = temp_file_name_stem(prefix);
-
-    for attempt in 0..10u32 {
-        let path = temp_file_candidate_path(&dir, &stem, Some(ext), attempt);
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+    let prefix = prefix.to_owned();
+    let ext = ext.to_owned();
+    let (path, file) =
+        tokio::task::spawn_blocking(move || create_temp_file_blocking(&prefix, Some(&ext)))
             .await
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("Failed to create temp file {}", path.display()))
-            }
-        }
-    }
-
-    bail!("Failed to create a unique temp file in {}", dir.display())
+            .context("Temp file creation task panicked")??;
+    Ok((path, tokio::fs::File::from_std(file)))
 }
 
 /// Run a command, streaming its stdout/stderr to the terminal.
@@ -784,7 +746,7 @@ async fn run_command(program: &str, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_checksum_from_text, parse_checksum_line, temp_file_candidate_path};
+    use super::{create_temp_file_blocking, expected_checksum_from_text, parse_checksum_line};
 
     const HASH_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const HASH_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -847,12 +809,18 @@ mod tests {
     }
 
     #[test]
-    fn temp_file_candidate_path_uses_provided_dir() {
-        let dir = std::path::Path::new("/tmp/custom-dir");
+    fn create_temp_file_blocking_respects_prefix_and_suffix() {
+        let (path, file) = create_temp_file_blocking("geoengine_test", Some("sh"))
+            .expect("temp file should be created");
+        drop(file);
 
-        assert_eq!(
-            temp_file_candidate_path(dir, "geoengine_test", Some("sh"), 3),
-            dir.join("geoengine_test_3.sh")
-        );
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("temp file name should be valid UTF-8");
+        assert!(name.starts_with("geoengine_test"));
+        assert!(name.ends_with(".sh"));
+
+        let _ = std::fs::remove_file(path);
     }
 }
