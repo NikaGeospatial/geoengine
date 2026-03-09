@@ -104,23 +104,22 @@ async fn update_via_shell() -> Result<()> {
 
     verify_checksum(&archive_bytes, &archive_name, &tag).await?;
 
-    // Write archive to a temp file and hand it to the install script via --local
-    // so the script handles sudo / PATH setup without re-downloading.
-    let tmp_archive = write_temp_file(&archive_bytes, "geoengine", "tar.gz")?;
-
-    // Extract the binary from the archive into a sibling temp file.
-    let tmp_binary = extract_binary_from_tar(&tmp_archive)?;
+    // Extract the binary directly from the in-memory archive bytes.
+    let tmp_binary = extract_binary_from_tar_bytes(&archive_bytes)?;
 
     let script_url = format!(
         "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.sh",
         tag
     );
     println!("{}", format!("==> Downloading install.sh @ {}", tag).blue());
-    let script_bytes = fetch_bytes(&script_url)
-        .await
-        .context("Failed to download install.sh")?;
+    let script_bytes = fetch_bytes(&script_url).await.inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp_binary);
+    }).context("Failed to download install.sh")?;
 
-    let tmp_script = write_temp_script(&script_bytes, "install", "sh")?;
+    let tmp_script = write_temp_script(&script_bytes, "install", "sh").inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp_binary);
+    })?;
+
     println!(
         "{}",
         format!("==> bash {} --local {}", tmp_script.display(), tmp_binary.display()).blue()
@@ -131,9 +130,12 @@ async fn update_via_shell() -> Result<()> {
         .arg(&tmp_binary)
         .status()
         .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp_binary);
+            let _ = std::fs::remove_file(&tmp_script);
+        })
         .context("Failed to run install.sh")?;
 
-    let _ = std::fs::remove_file(&tmp_archive);
     let _ = std::fs::remove_file(&tmp_binary);
     let _ = std::fs::remove_file(&tmp_script);
 
@@ -162,21 +164,22 @@ async fn update_via_powershell() -> Result<()> {
 
     verify_checksum(&archive_bytes, &archive_name, &tag).await?;
 
-    let tmp_archive = write_temp_file(&archive_bytes, "geoengine", "zip")?;
-
-    // Extract geoengine.exe from the zip into a temp directory.
-    let tmp_binary = extract_binary_from_zip(&tmp_archive)?;
+    // Extract geoengine.exe directly from the in-memory archive bytes.
+    let tmp_binary = extract_binary_from_zip_bytes(&archive_bytes)?;
 
     let script_url = format!(
         "https://raw.githubusercontent.com/NikaGeospatial/geoengine/{}/install/install.ps1",
         tag
     );
     println!("{}", format!("==> Downloading install.ps1 @ {}", tag).blue());
-    let script_bytes = fetch_bytes(&script_url)
-        .await
-        .context("Failed to download install.ps1")?;
+    let script_bytes = fetch_bytes(&script_url).await.inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp_binary);
+    }).context("Failed to download install.ps1")?;
 
-    let tmp_script = write_temp_script(&script_bytes, "install", "ps1")?;
+    let tmp_script = write_temp_script(&script_bytes, "install", "ps1").inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp_binary);
+    })?;
+
     println!(
         "{}",
         format!(
@@ -201,9 +204,12 @@ async fn update_via_powershell() -> Result<()> {
         ])
         .status()
         .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp_binary);
+            let _ = std::fs::remove_file(&tmp_script);
+        })
         .context("Failed to run install.ps1")?;
 
-    let _ = std::fs::remove_file(&tmp_archive);
     let _ = std::fs::remove_file(&tmp_binary);
     let _ = std::fs::remove_file(&tmp_script);
 
@@ -263,15 +269,25 @@ async fn verify_checksum(data: &[u8], archive_name: &str, tag: &str) -> Result<(
     let checksums_text =
         std::str::from_utf8(&checksums_text).context("checksums.txt is not valid UTF-8")?;
 
-    // Each line: "<sha256>  <filename>"
+    // Each line is either "<sha256>  <filename>" (sha256sum text mode)
+    // or "<sha256> *<filename>" (sha256sum binary mode). Split on the first
+    // run of whitespace and strip a leading '*' from the filename field.
     let expected_hash = checksums_text
         .lines()
         .find_map(|line| {
             let mut parts = line.splitn(2, "  ");
-            let hash = parts.next()?;
-            let name = parts.next()?.trim();
+            let (hash, name) = if let (Some(h), Some(n)) = (parts.next(), parts.next()) {
+                // Two-space separator (text mode).
+                (h.trim(), n.trim())
+            } else {
+                // Fall back to single-space separator (binary mode: "<hash> *<name>").
+                let mut parts = line.splitn(2, ' ');
+                let h = parts.next()?.trim();
+                let n = parts.next()?.trim().trim_start_matches('*');
+                (h, n)
+            };
             if name == archive_name {
-                Some(hash.trim().to_owned())
+                Some(hash.to_owned())
             } else {
                 None
             }
@@ -306,22 +322,10 @@ async fn verify_checksum(data: &[u8], archive_name: &str, tag: &str) -> Result<(
     Ok(())
 }
 
-/// Write `data` to a temporary file and return the path.
-fn write_temp_file(data: &[u8], prefix: &str, ext: &str) -> Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir();
-    let name = format!("{}_{}.{}", prefix, std::process::id(), ext);
-    let path = dir.join(name);
-    std::fs::write(&path, data)
-        .with_context(|| format!("Failed to write temp file to {}", path.display()))?;
-    Ok(path)
-}
-
-/// Extract the `geoengine` binary from a `.tar.gz` archive at `archive_path`
-/// and write it to a sibling temp file. Returns the path to the binary.
-fn extract_binary_from_tar(archive_path: &std::path::Path) -> Result<std::path::PathBuf> {
-    let file = std::fs::File::open(archive_path)
-        .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
-    let gz = flate2::read::GzDecoder::new(file);
+/// Extract the `geoengine` binary from in-memory `.tar.gz` bytes
+/// and write it to a temp file. Returns the path to the binary.
+fn extract_binary_from_tar_bytes(data: &[u8]) -> Result<std::path::PathBuf> {
+    let gz = flate2::read::GzDecoder::new(data);
     let mut archive = tar::Archive::new(gz);
 
     let out_path = std::env::temp_dir().join(format!("geoengine_{}_bin", std::process::id()));
@@ -347,15 +351,14 @@ fn extract_binary_from_tar(archive_path: &std::path::Path) -> Result<std::path::
         }
     }
 
-    bail!("Binary 'geoengine' not found inside archive {}", archive_path.display())
+    bail!("Binary 'geoengine' not found inside tar.gz archive")
 }
 
-/// Extract `geoengine.exe` from a `.zip` archive at `archive_path`
-/// and write it to a sibling temp file. Returns the path to the binary.
-fn extract_binary_from_zip(archive_path: &std::path::Path) -> Result<std::path::PathBuf> {
-    let file = std::fs::File::open(archive_path)
-        .with_context(|| format!("Failed to open archive {}", archive_path.display()))?;
-    let mut zip = zip::ZipArchive::new(file).context("Failed to read zip archive")?;
+/// Extract `geoengine.exe` from in-memory `.zip` bytes
+/// and write it to a temp file. Returns the path to the binary.
+fn extract_binary_from_zip_bytes(data: &[u8]) -> Result<std::path::PathBuf> {
+    let cursor = std::io::Cursor::new(data);
+    let mut zip = zip::ZipArchive::new(cursor).context("Failed to read zip archive")?;
 
     let out_path =
         std::env::temp_dir().join(format!("geoengine_{}_bin.exe", std::process::id()));
@@ -377,7 +380,7 @@ fn extract_binary_from_zip(archive_path: &std::path::Path) -> Result<std::path::
         }
     }
 
-    bail!("Binary 'geoengine.exe' not found inside archive {}", archive_path.display())
+    bail!("Binary 'geoengine.exe' not found inside zip archive")
 }
 
 const GITHUB_API_LATEST: &str =
