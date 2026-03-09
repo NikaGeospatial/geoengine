@@ -407,6 +407,11 @@ fn create_temp_file_blocking(
     bail!("Failed to create a unique temp file in {}", dir.display())
 }
 
+fn cleanup_temp_pair(first: &std::path::Path, second: &std::path::Path) {
+    let _ = std::fs::remove_file(first);
+    let _ = std::fs::remove_file(second);
+}
+
 /// Extract the `geoengine` binary and `install.sh` script from a `.tar.gz` archive
 /// in a single pass. Returns `(binary_path, script_path)`.
 ///
@@ -429,10 +434,18 @@ fn extract_from_tar(
     let mut binary_done = false;
     let mut script_done = false;
 
-    for entry in archive.entries().context("Failed to read tar entries")? {
-        let mut entry = entry.context("Failed to read tar entry")?;
+    let entries = archive.entries().inspect_err(|_| {
+        cleanup_temp_pair(&binary_out, &script_out);
+    })?;
+
+    for entry in entries {
+        let mut entry = entry.inspect_err(|_| {
+            cleanup_temp_pair(&binary_out, &script_out);
+        })?;
         let name = {
-            let p = entry.path().context("Failed to read entry path")?;
+            let p = entry.path().inspect_err(|_| {
+                cleanup_temp_pair(&binary_out, &script_out);
+            })?;
             p.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default()
@@ -442,28 +455,28 @@ fn extract_from_tar(
         match name.as_str() {
             "geoengine" if !binary_done => {
                 std::io::copy(&mut entry, &mut binary_file).inspect_err(|_| {
-                    let _ = std::fs::remove_file(&binary_out);
+                    cleanup_temp_pair(&binary_out, &script_out);
                 })?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&binary_out, std::fs::Permissions::from_mode(0o755))
                         .inspect_err(|_| {
-                        let _ = std::fs::remove_file(&binary_out);
+                        cleanup_temp_pair(&binary_out, &script_out);
                     })?;
                 }
                 binary_done = true;
             }
             "install.sh" if !script_done => {
                 std::io::copy(&mut entry, &mut script_file).inspect_err(|_| {
-                    let _ = std::fs::remove_file(&script_out);
+                    cleanup_temp_pair(&binary_out, &script_out);
                 })?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&script_out, std::fs::Permissions::from_mode(0o700))
                         .inspect_err(|_| {
-                        let _ = std::fs::remove_file(&script_out);
+                        cleanup_temp_pair(&binary_out, &script_out);
                     })?;
                 }
                 script_done = true;
@@ -477,13 +490,11 @@ fn extract_from_tar(
     }
 
     if !binary_done {
-        let _ = std::fs::remove_file(&binary_out);
-        let _ = std::fs::remove_file(&script_out);
+        cleanup_temp_pair(&binary_out, &script_out);
         bail!("Binary 'geoengine' not found inside tar.gz archive");
     }
     if !script_done {
-        let _ = std::fs::remove_file(&binary_out);
-        let _ = std::fs::remove_file(&script_out);
+        cleanup_temp_pair(&binary_out, &script_out);
         bail!("Script 'install.sh' not found inside tar.gz archive");
     }
 
@@ -512,7 +523,9 @@ fn extract_from_zip(
     let mut script_done = false;
 
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).context("Failed to read zip entry")?;
+        let mut entry = zip.by_index(i).inspect_err(|_| {
+            cleanup_temp_pair(&binary_out, &script_out);
+        })?;
         // Use file_name() so entries stored as `./geoengine.exe` or inside a
         // subdirectory are matched the same way as bare `geoengine.exe`.
         let name = std::path::Path::new(entry.name())
@@ -525,7 +538,7 @@ fn extract_from_zip(
             "geoengine.exe" if !binary_done => {
                 std::io::copy(&mut entry, &mut binary_file)
                     .inspect_err(|_| {
-                        let _ = std::fs::remove_file(&binary_out);
+                        cleanup_temp_pair(&binary_out, &script_out);
                     })
                     .context("Failed to extract binary from zip")?;
                 binary_done = true;
@@ -533,7 +546,7 @@ fn extract_from_zip(
             "install.ps1" if !script_done => {
                 std::io::copy(&mut entry, &mut script_file)
                     .inspect_err(|_| {
-                        let _ = std::fs::remove_file(&script_out);
+                        cleanup_temp_pair(&binary_out, &script_out);
                     })
                     .context("Failed to extract install.ps1 from zip")?;
                 script_done = true;
@@ -547,13 +560,11 @@ fn extract_from_zip(
     }
 
     if !binary_done {
-        let _ = std::fs::remove_file(&binary_out);
-        let _ = std::fs::remove_file(&script_out);
+        cleanup_temp_pair(&binary_out, &script_out);
         bail!("Binary 'geoengine.exe' not found inside zip archive");
     }
     if !script_done {
-        let _ = std::fs::remove_file(&binary_out);
-        let _ = std::fs::remove_file(&script_out);
+        cleanup_temp_pair(&binary_out, &script_out);
         bail!("Script 'install.ps1' not found inside zip archive");
     }
 
