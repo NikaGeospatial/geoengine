@@ -89,6 +89,10 @@ enum Commands {
         #[arg(long)]
         dev: bool,
 
+        /// Run a specific previously-built version of the worker
+        #[arg(long)]
+        ver: Option<String>,
+
         /// Extra arguments passed through to the container command
         #[arg(last = true)]
         args: Vec<String>,
@@ -113,6 +117,14 @@ enum Commands {
         /// Output as JSON (for programmatic use)
         #[arg(long)]
         json: bool,
+
+        /// Describe the currently applied development config
+        #[arg(long)]
+        dev: bool,
+
+        /// Describe a specific previously-built version
+        #[arg(long = "ver")]
+        ver: Option<String>,
     },
 
     /// Check for differences in files, or a specific file
@@ -172,12 +184,19 @@ impl Cli {
                 inputs,
                 json,
                 dev,
+                ver,
                 args,
-            } => worker::run_worker(worker.as_deref(), &inputs, json, dev, &args).await,
-            Commands::Workers { json, gis } => worker::list_workers(json, gis).await,
-            Commands::Describe { worker, json } => {
-                worker::describe_worker(worker.as_deref(), json).await
+            } => {
+                worker::run_worker(worker.as_deref(), &inputs, json, dev, ver.as_deref(), &args)
+                    .await
             }
+            Commands::Workers { json, gis } => worker::list_workers(json, gis).await,
+            Commands::Describe {
+                worker,
+                json,
+                dev,
+                ver,
+            } => worker::describe_worker(worker.as_deref(), json, dev, ver.as_deref()).await,
             Commands::Diff { file } => worker::diff_worker(file.as_deref()).await,
             Commands::Deploy { command } => command.execute().await,
             Commands::Patch => patch::patch_all_v2().await,

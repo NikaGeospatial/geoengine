@@ -4,6 +4,8 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
+use crate::config::worker::VersionConfigMaps;
+use crate::config::yaml_store::get_worker_saves_dir;
 use crate::docker::client::DockerClient;
 
 #[derive(Subcommand)]
@@ -96,8 +98,9 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
 
     println!("{}{}", " ".repeat(38), "PUSHED IMAGES".bold());
     println!(
-        "{:<50} {:<20} {:<15} {}",
-        "REPOSITORY:TAG".bold(),
+        "{:<41} {:<8} {:<20} {:<15} {}",
+        "WORKER".bold(),
+        "VERSION".bold(),
         "IMAGE ID".bold(),
         "SIZE".bold(),
         "CREATED".bold()
@@ -105,18 +108,26 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
     println!("{}", "-".repeat(100));
 
     for image in &images {
-        let repo_tag = image
+        let tags = image
             .repo_tags
             .iter()
-            .filter(|t| !t.starts_with("geoengine-local-dev/"))
-            .map(|s| s.as_str())
-            .collect::<Vec<&str>>();
+            .filter(|t| t.starts_with("geoengine-local/"))
+            .map(|s| {
+                s.as_str()
+                    .trim_start_matches("geoengine-local/")
+                    .split_once(":")
+                    .unwrap_or((s, "latest"))
+            })
+            .collect::<Vec<(&str, &str)>>();
         let id = short_image_id(&image.id);
         let size = format_size(image.size);
         let created = format_timestamp(image.created);
 
-        for tag in repo_tag {
-            println!("{:<50} {:<20} {:<15} {}", tag, id, size, created);
+        for (worker, ver) in tags {
+            println!(
+                "{:<41} {:<8} {:<20} {:<15} {}",
+                worker, ver, id, size, created
+            );
         }
     }
 
@@ -124,7 +135,7 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
     println!("{}{}", " ".repeat(40), "DEV IMAGES".bold());
     println!(
         "{:<50} {:<20} {:<15} {}",
-        "REPOSITORY:TAG".bold(),
+        "WORKER".bold(),
         "IMAGE ID".bold(),
         "SIZE".bold(),
         "CREATED".bold()
@@ -132,17 +143,21 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
     println!("{}", "-".repeat(100));
 
     for image in &images {
-        let repo_tag = image
+        let worker = image
             .repo_tags
             .iter()
             .filter(|t| t.starts_with("geoengine-local-dev/"))
-            .map(|s| s.as_str())
+            .map(|s| {
+                s.as_str()
+                    .trim_start_matches("geoengine-local-dev/")
+                    .trim_end_matches(":latest")
+            })
             .collect::<Vec<&str>>();
         let id = short_image_id(&image.id);
         let size = format_size(image.size);
         let created = format_timestamp(image.created);
 
-        for tag in repo_tag {
+        for tag in worker {
             println!("{:<50} {:<20} {:<15} {}", tag, id, size, created);
         }
     }
@@ -164,7 +179,72 @@ async fn remove_image(client: &DockerClient, image: &str, force: bool) -> Result
         image.cyan()
     );
 
+    // Clean up the version mapping from saves if this is a geoengine-local release image
+    if let Some(rest) = image.strip_prefix("geoengine-local/") {
+        if let Some((worker_name, version)) = rest.split_once(':') {
+            remove_version_from_saves(worker_name, version);
+        }
+    }
+
     Ok(())
+}
+
+fn remove_version_from_saves(worker_name: &str, version: &str) {
+    let saves_dir = match get_worker_saves_dir(worker_name) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    let mut map = match VersionConfigMaps::load_from_worker(worker_name) {
+        Ok(m) => m,
+        Err(_) => return, // no saves for this worker; nothing to clean
+    };
+
+    let mut mappings = map.mappings.unwrap_or_default();
+
+    // Get the hash before removing so we can check if it's still referenced
+    let removed_hash = mappings.remove(version);
+    map.mappings = if mappings.is_empty() {
+        None
+    } else {
+        Some(mappings.clone())
+    };
+
+    if let Err(e) = map.save_to_worker(worker_name) {
+        eprintln!("{} Failed to update saves map: {}", "!".yellow().bold(), e);
+        return;
+    }
+
+    println!(
+        "  {} Removed version '{}' from saves map for worker '{}'",
+        "✓".green().bold(),
+        version,
+        worker_name
+    );
+
+    // If the removed hash is no longer referenced by any other version, delete the snapshot
+    if let Some(hash) = removed_hash {
+        let still_referenced = mappings.values().any(|h| h == &hash);
+        if !still_referenced {
+            let snapshot = saves_dir.join(format!("{}.json", hash));
+            if snapshot.exists() {
+                if let Err(e) = std::fs::remove_file(&snapshot) {
+                    eprintln!(
+                        "  {} Failed to delete snapshot file: {}",
+                        "!".yellow().bold(),
+                        e
+                    );
+                } else {
+                    let short_hash = &hash[..12.min(hash.len())];
+                    println!(
+                        "  {} Deleted unreferenced config snapshot ({})",
+                        "✓".green().bold(),
+                        short_hash
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn format_size(bytes: i64) -> String {

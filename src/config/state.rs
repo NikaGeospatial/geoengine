@@ -25,6 +25,12 @@ pub struct WorkerState {
     pub pushed_build_hash: Option<String>,
     /// Latest pushed image tag (non-dev)
     pub image_tag: Option<String>,
+    /// Whether a local dev image (`geoengine-local-dev/<worker>:latest`) exists
+    #[serde(default)]
+    pub has_dev_image: bool,
+    /// Whether a local pushed image (`geoengine-local/<worker>:<version>`) exists
+    #[serde(default)]
+    pub has_pushed_image: bool,
     /// Main script
     pub script: Option<String>,
     pub plugins_arcgis: Option<bool>,

@@ -72,6 +72,31 @@ def set_dev_mode_enabled(enabled: bool) -> None:
     s.sync()
 
 
+# ---------------------------------------------------------------------------
+# Worker version pinning — persisted as a JSON file in the plugin directory
+# ---------------------------------------------------------------------------
+
+WORKER_VERSIONS_FILE = os.path.join(_PLUGIN_DIR, "worker_versions.json")
+
+
+def load_worker_versions() -> Dict[str, List[str]]:
+    """Return saved per-worker version rows, defaulting to empty dict on any error."""
+    try:
+        with open(WORKER_VERSIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if isinstance(v, list)}
+    except Exception:
+        pass
+    return {}
+
+
+def save_worker_versions(data: Dict[str, List[str]]) -> None:
+    """Persist per-worker version rows to the plugin directory."""
+    with open(WORKER_VERSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
 class GeoEngineCLIClient:
     """Client that invokes the geoengine CLI binary via subprocess."""
 
@@ -196,10 +221,15 @@ class GeoEngineCLIClient:
             raise Exception(f"Failed to list workers: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
-    def get_worker_tool(self, name: str) -> Optional[Dict]:
+    def get_worker_tool(self, name: str, ver: Optional[str] = None) -> Optional[Dict]:
         """Get the tool/input description for a worker via `geoengine run <name> --describe`."""
+        describe_args = [self.binary, 'describe', name, '--json']
+        if is_dev_mode_enabled():
+            describe_args.append('--dev')
+        if ver:
+            describe_args.extend(['--ver', ver])
         result = subprocess.run(
-            [self.binary, 'describe', name, '--json'],
+            describe_args,
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
@@ -213,6 +243,7 @@ class GeoEngineCLIClient:
         on_output: Optional[Callable[[str], None]] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
         dev_mode: Optional[bool] = None,
+        ver: Optional[str] = None,
     ) -> Dict:
         """Run a worker synchronously, streaming container output via on_output.
 
@@ -224,6 +255,8 @@ class GeoEngineCLIClient:
             dev_mode = is_dev_mode_enabled()
         if dev_mode:
             cmd.append('--dev')
+        elif ver:
+            cmd.extend(['--ver', ver])
 
         for key, value in inputs.items():
             if value is not None:
@@ -349,14 +382,51 @@ class GeoEngineProvider(QgsProcessingProvider):
         try:
             client = GeoEngineCLIClient()
             workers = client.list_workers()
+            saved_versions = load_worker_versions()
+            versions_changed = False
 
             for worker in workers:
                 if not worker.get('has_tool', False):
                     continue
-                tool = client.get_worker_tool(worker['name'])
-                if tool:
-                    alg = GeoEngineAlgorithm(worker['name'], tool)
-                    algorithms.append(alg)
+
+                if is_dev_mode_enabled():
+                    # Dev mode: single algorithm per worker, no version pinning
+                    if not worker.get('has_dev_image'):
+                        continue
+                    tool = client.get_worker_tool(worker['name'])
+                    if tool:
+                        algorithms.append(GeoEngineAlgorithm(worker['name'], tool, ver=None))
+                else:
+                    # Release mode: support multiple version rows per worker
+                    if not worker.get('has_pushed_image'):
+                        continue
+                    tool = client.get_worker_tool(worker['name'])
+                    if not tool:
+                        continue
+
+                    # Build set of valid versions for this worker
+                    available = set(tool.get('available_versions') or [])
+                    available.add('latest')
+
+                    # Load saved rows, pruning any stale versions
+                    rows = saved_versions.get(worker['name'], ['latest'])
+                    valid_rows = [v for v in rows if v == 'latest' or v in available]
+                    if not valid_rows:
+                        valid_rows = ['latest']
+                    if valid_rows != rows:
+                        saved_versions[worker['name']] = valid_rows
+                        versions_changed = True
+
+                    for ver in valid_rows:
+                        actual_ver = None if ver == 'latest' else ver
+                        if actual_ver:
+                            versioned_tool = client.get_worker_tool(worker['name'], ver=actual_ver) or tool
+                        else:
+                            versioned_tool = tool
+                        algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=actual_ver))
+
+            if versions_changed:
+                save_worker_versions(saved_versions)
 
         except Exception as e:
             print(f"GeoEngine tool discovery failed: {e}")
@@ -373,24 +443,31 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
     """Dynamic QGIS Processing algorithm for a GeoEngine worker."""
     OPEN_OUTPUT_FOLDER_PARAM = "__geoengine_open_output_folder"
 
-    def __init__(self, worker_name: str, tool_info: Dict):
+    def __init__(self, worker_name: str, tool_info: Dict, ver: Optional[str] = None):
         """Initialize an algorithm wrapper for a worker definition."""
         super().__init__()
         self._worker = worker_name
         self._tool = tool_info
         self._inputs = tool_info.get('inputs', [])
+        self._ver = ver  # None means "latest" (no --ver flag)
 
     def createInstance(self):
         """Create a new algorithm instance for QGIS cloning."""
-        return GeoEngineAlgorithm(self._worker, self._tool)
+        return GeoEngineAlgorithm(self._worker, self._tool, self._ver)
 
     def name(self) -> str:
-        """Return the algorithm id used by QGIS processing."""
+        """Return the algorithm id used by QGIS processing (must be unique per algorithm)."""
+        if self._ver:
+            safe = self._ver.replace('.', '_').replace('-', '_')
+            return f"{self._worker}__ver__{safe}"
         return self._worker
 
     def displayName(self) -> str:
         """Return the human-readable algorithm name."""
-        return self._tool.get('name', self._worker)
+        base = self._tool.get('name', self._worker)
+        if self._ver:
+            return f"{base} ({self._ver})"
+        return base
 
     def group(self) -> str:
         """Return the group label for this algorithm."""
@@ -408,29 +485,34 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         if description:
             parts.append(description)
 
-        applied_at = self._tool.get('applied_at')
-        built_at = self._tool.get('built_at')
-        yaml_hash = self._tool.get('yaml_hash')
-        script_hash = self._tool.get('script_hash')
+        if is_dev_mode_enabled():
+            applied_at = self._tool.get('applied_at')
+            built_at = self._tool.get('built_at')
+            yaml_hash = self._tool.get('yaml_hash')
+            script_hash = self._tool.get('script_hash')
 
-        parts.append("\n--------------\n")
-        apply_block = []
-        if yaml_hash:
-            apply_block.append(f"Saved YAML hash: {yaml_hash}...")
-        if applied_at:
-            apply_block.append(f"Last applied {self._format_age(applied_at)}")
-        if apply_block:
-            parts.append("\n".join(apply_block))
-            parts.append("--------------\n")
+            parts.append("\n--------------\n")
+            apply_block = []
+            if yaml_hash:
+                apply_block.append(f"Saved YAML hash: {yaml_hash}...")
+            if applied_at:
+                apply_block.append(f"Last applied {self._format_age(applied_at)}")
+            if apply_block:
+                parts.append("\n".join(apply_block))
+                parts.append("--------------\n")
 
-        build_block = []
-        if script_hash:
-            build_block.append(f"Built script hash: {script_hash}...")
-        if built_at:
-            build_block.append(f"Last built {self._format_age(built_at)}")
-        if build_block:
-            parts.append("\n".join(build_block))
-            parts.append("--------------\n")
+            build_block = []
+            if script_hash:
+                build_block.append(f"Built script hash: {script_hash}...")
+            if built_at:
+                build_block.append(f"Last built {self._format_age(built_at)}")
+            if build_block:
+                parts.append("\n".join(build_block))
+                parts.append("--------------\n")
+
+        else:
+            ver_display = self._ver or self._tool.get('version') or 'latest'
+            parts.append(f"Version: {ver_display}")
 
         return "\n\n".join(parts)
 
@@ -1154,6 +1236,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 inputs=inputs,
                 on_output=lambda line: feedback.pushInfo(line),
                 is_cancelled=lambda: feedback.isCanceled(),
+                ver=self._ver,
             )
 
             feedback.pushInfo("Worker completed successfully!")
@@ -1196,3 +1279,243 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         finally:
             for temp_dir in temp_export_dirs:
                 shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Worker version management dialog
+# ---------------------------------------------------------------------------
+
+class WorkerVersionsDialog:
+    """Dialog for managing per-worker version pins.
+
+    Shows one section per worker.  Each section has one or more rows; every row
+    has a version dropdown, a "+" button to add another version, and a "✕"
+    button to remove that row.
+
+    The dialog is built with plain Qt widgets so it works without a .ui file.
+
+    Args:
+        worker_versions_info: mapping of worker_name → list of available
+            version strings (must include ``"latest"`` as the first entry).
+        current_selections: mapping of worker_name → list of currently-saved
+            version strings (the persisted rows).
+        parent: optional parent QWidget.
+    """
+
+    def __init__(
+        self,
+        worker_versions_info: Dict[str, List[str]],
+        current_selections: Dict[str, List[str]],
+        parent=None,
+    ):
+        from qgis.PyQt.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+            QPushButton, QDialogButtonBox, QScrollArea, QWidget, QFrame,
+        )
+        from qgis.PyQt.QtCore import Qt
+
+        self._worker_versions_info = worker_versions_info  # name → [all available]
+        self._current_selections = current_selections       # name → [saved rows]
+
+        self._dialog = QDialog(parent)
+        self._dialog.setWindowTitle("Set Worker Versions")
+        self._dialog.setMinimumWidth(520)
+
+        outer_layout = QVBoxLayout(self._dialog)
+
+        # Scrollable area containing per-worker sections
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        container = QWidget()
+        self._sections_layout = QVBoxLayout(container)
+        self._sections_layout.setSpacing(12)
+        scroll.setWidget(container)
+        outer_layout.addWidget(scroll)
+
+        # {worker_name: [{"combo": QComboBox, "plus": QPushButton, "cross": QPushButton}]}
+        self._rows: Dict[str, List[dict]] = {}
+
+        for worker_name, available in sorted(worker_versions_info.items()):
+            saved = current_selections.get(worker_name, ['latest'])
+            # Ensure saved rows only reference versions that are actually available
+            valid_saved = [v for v in saved if v in available]
+            if not valid_saved:
+                valid_saved = ['latest']
+            self._build_worker_section(worker_name, available, valid_saved)
+
+        if not worker_versions_info:
+            no_workers_label = QLabel("No workers with released images found.")
+            no_workers_label.setAlignment(Qt.AlignCenter)
+            self._sections_layout.addWidget(no_workers_label)
+
+        self._sections_layout.addStretch()
+
+        # Dialog buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel,
+            parent=self._dialog,
+        )
+        button_box.accepted.connect(self._dialog.accept)
+        button_box.rejected.connect(self._dialog.reject)
+        outer_layout.addWidget(button_box)
+
+    def _build_worker_section(
+        self,
+        worker_name: str,
+        available: List[str],
+        initial_rows: List[str],
+    ) -> None:
+        """Build the UI section for one worker and attach it to the main layout."""
+        from qgis.PyQt.QtWidgets import QLabel, QFrame, QVBoxLayout, QWidget
+
+        section = QWidget()
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(4)
+
+        label = QLabel(f"<b>{worker_name}</b>")
+        section_layout.addWidget(label)
+
+        self._rows[worker_name] = []
+
+        rows_widget = QWidget()
+        rows_layout = QVBoxLayout(rows_widget)
+        rows_layout.setContentsMargins(0, 0, 0, 0)
+        rows_layout.setSpacing(2)
+        section_layout.addWidget(rows_widget)
+
+        # Separator line
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        section_layout.addWidget(line)
+
+        self._sections_layout.addWidget(section)
+
+        # Store layout reference for later row insertion
+        section._rows_layout = rows_layout
+        section._worker_name = worker_name
+        self._dialog._sections = getattr(self._dialog, '_sections', {})
+        self._dialog._sections[worker_name] = section
+
+        for ver in initial_rows:
+            self._add_row(worker_name, ver)
+
+    def _selected_versions(self, worker_name: str) -> List[str]:
+        """Return the list of currently-selected versions for a worker."""
+        return [r['combo'].currentText() for r in self._rows.get(worker_name, [])]
+
+    def _refresh_all_rows(self, worker_name: str) -> None:
+        """Re-populate dropdowns and update button states for all rows of a worker."""
+        rows = self._rows.get(worker_name, [])
+        available = self._worker_versions_info.get(worker_name, ['latest'])
+        selected_set = set(self._selected_versions(worker_name))
+
+        for row in rows:
+            combo = row['combo']
+            current = combo.currentText()
+            # Options for this row = versions not selected by OTHER rows, plus own current
+            other_selected = selected_set - {current}
+            options = [v for v in available if v not in other_selected]
+
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(options)
+            idx = combo.findText(current)
+            combo.setCurrentIndex(max(0, idx))
+            combo.blockSignals(False)
+
+        # "+" button enabled when there are unused versions available
+        used = set(self._selected_versions(worker_name))
+        has_unused = any(v for v in available if v not in used)
+        for row in rows:
+            row['plus'].setEnabled(has_unused)
+
+        # "✕" button: always show, but disable when only 1 row remains (minimum 1)
+        for row in rows:
+            row['cross'].setEnabled(len(rows) > 1)
+
+    def _add_row(self, worker_name: str, ver: str) -> None:
+        """Append a new version row for ``worker_name`` pre-selected to ``ver``."""
+        from qgis.PyQt.QtWidgets import QHBoxLayout, QComboBox, QPushButton, QWidget
+
+        available = self._worker_versions_info.get(worker_name, ['latest'])
+        used = set(self._selected_versions(worker_name))
+
+        # Options = all available versions not yet selected (plus this ver itself)
+        options = [v for v in available if v not in used or v == ver]
+
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(16, 0, 0, 0)
+        row_layout.setSpacing(4)
+
+        combo = QComboBox()
+        combo.addItems(options)
+        idx = combo.findText(ver)
+        combo.setCurrentIndex(max(0, idx))
+        row_layout.addWidget(combo, stretch=1)
+
+        plus_btn = QPushButton("+")
+        plus_btn.setFixedWidth(28)
+        row_layout.addWidget(plus_btn)
+
+        cross_btn = QPushButton("✕")
+        cross_btn.setFixedWidth(28)
+        row_layout.addWidget(cross_btn)
+
+        row_dict = {'widget': row_widget, 'combo': combo, 'plus': plus_btn, 'cross': cross_btn}
+        self._rows[worker_name].append(row_dict)
+
+        # Attach to the section's rows layout
+        section = self._dialog._sections[worker_name]
+        section._rows_layout.addWidget(row_widget)
+
+        # Wire signals
+        combo.currentTextChanged.connect(lambda _: self._refresh_all_rows(worker_name))
+        plus_btn.clicked.connect(lambda: self._on_plus(worker_name))
+        cross_btn.clicked.connect(lambda: self._on_cross(worker_name, row_dict))
+
+        self._refresh_all_rows(worker_name)
+
+    def _resize_dialog(self, delta: int) -> None:
+        """Grow or shrink the dialog height by ``delta`` pixels."""
+        geo = self._dialog.geometry()
+        self._dialog.setGeometry(geo.x(), geo.y(), geo.width(), max(100, geo.height() + delta))
+
+    def _on_plus(self, worker_name: str) -> None:
+        """Add a new row for ``worker_name`` with the first unused version."""
+        available = self._worker_versions_info.get(worker_name, ['latest'])
+        used = set(self._selected_versions(worker_name))
+        unused = [v for v in available if v not in used]
+        if not unused:
+            return
+        self._add_row(worker_name, unused[0])
+        # Measure the newly added row and grow the dialog by that amount
+        new_row = self._rows[worker_name][-1]
+        self._resize_dialog(new_row['widget'].sizeHint().height() + 2)
+
+    def _on_cross(self, worker_name: str, row_dict: dict) -> None:
+        """Remove a version row for ``worker_name``."""
+        rows = self._rows.get(worker_name, [])
+        if len(rows) <= 1:
+            return
+        # Measure height before removal
+        row_height = row_dict['widget'].sizeHint().height() + 2
+        rows.remove(row_dict)
+        row_dict['widget'].setParent(None)
+        row_dict['widget'].deleteLater()
+        self._refresh_all_rows(worker_name)
+        self._resize_dialog(-row_height)
+
+    def exec_(self) -> int:
+        """Show the dialog modally and return the result code."""
+        return self._dialog.exec_()
+
+    def get_result(self) -> Dict[str, List[str]]:
+        """Return the final per-worker version selections after the dialog was accepted."""
+        result: Dict[str, List[str]] = {}
+        for worker_name, rows in self._rows.items():
+            result[worker_name] = [r['combo'].currentText() for r in rows]
+        return result

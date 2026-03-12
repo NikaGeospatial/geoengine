@@ -3,7 +3,7 @@ use crate::cli::plugins::{verify_arcgis_plugin_installed, verify_qgis_plugin_ins
 use crate::config::pixi::PixiConfig;
 use crate::config::settings::Settings;
 use crate::config::state::{self, sha256_bytes, WorkerState};
-use crate::config::worker::WorkerConfig;
+use crate::config::worker::{RelevantWorkerConfig, VersionConfigMaps, WorkerConfig};
 use crate::config::yaml_store;
 use crate::docker::client::DockerClient;
 use crate::docker::container::ContainerConfig;
@@ -32,6 +32,8 @@ struct WorkerListEntry {
     path: String,
     has_tool: bool,
     found: bool,
+    has_dev_image: bool,
+    has_pushed_image: bool,
     description: Option<String>,
 }
 
@@ -54,6 +56,9 @@ struct WorkerDescription {
     /// First 12 hex chars of the command script SHA-256 hash
     #[serde(skip_serializing_if = "Option::is_none")]
     script_hash: Option<String>,
+    /// Semver-sorted list of versions that have been built and snapshotted
+    #[serde(skip_serializing_if = "Option::is_none")]
+    available_versions: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -591,7 +596,15 @@ pub async fn build_worker(
             verbose,
             progress_step_tx,
         )
-        .await;
+        .await
+        .and_then(|_| {
+            if !dev {
+                yaml_store::cache_and_tag_config(worker, new_version.as_ref())
+                    .context(format!("Failed to cache config for {}", worker))
+            } else {
+                Ok(())
+            }
+        });
 
     if let Some(step_task) = step_task {
         let _ = step_task.await;
@@ -627,6 +640,22 @@ pub async fn build_worker(
         command_hash,
         pushed_build_hash,
         image_tag,
+        has_dev_image: if dev {
+            true
+        } else {
+            prev_state
+                .as_ref()
+                .map(|s| s.has_dev_image)
+                .unwrap_or(false)
+        },
+        has_pushed_image: if dev {
+            prev_state
+                .as_ref()
+                .map(|s| s.has_pushed_image)
+                .unwrap_or(false)
+        } else {
+            true
+        },
         script: prev_state.as_ref().and_then(|s| s.script.clone()),
         plugins_arcgis: prev_state.as_ref().and_then(|s| s.plugins_arcgis),
         plugins_qgis: prev_state.as_ref().and_then(|s| s.plugins_qgis),
@@ -681,9 +710,10 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
                     settings.register_worker(&config.name, &canonical)?;
                     settings.save()?;
 
-                    // Migrate state and saved config to the new name
+                    // Migrate state, saved config, and saves directory to the new name
                     state::rename_state(&name, &config.name)?;
                     yaml_store::rename_saved_config(&name, &config.name)?;
+                    yaml_store::rename_saves_dir(&name, &config.name)?;
 
                     println!(
                         "{} Worker renamed from '{}' to '{}' — registration updated.",
@@ -763,6 +793,19 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
             "✓".green().bold(),
             worker_name.cyan()
         );
+    }
+
+    // Initialize saves directory with empty map.json if it doesn't exist
+    let saves_dir = yaml_store::get_worker_saves_dir(&worker_name)?;
+    if !saves_dir.exists() {
+        std::fs::create_dir_all(&saves_dir).with_context(|| {
+            format!("Failed to create saves directory: {}", saves_dir.display())
+        })?;
+        let initial_map = VersionConfigMaps {
+            worker: worker_name.clone(),
+            mappings: None,
+        };
+        initial_map.save_to_worker(&worker_name)?;
     }
 
     // Load previous state for plugin comparison
@@ -1018,6 +1061,14 @@ pub async fn apply_worker(worker: Option<&str>, _force: bool) -> Result<()> {
         command_hash,
         pushed_build_hash,
         image_tag,
+        has_dev_image: prev_state
+            .as_ref()
+            .map(|s| s.has_dev_image)
+            .unwrap_or(false),
+        has_pushed_image: prev_state
+            .as_ref()
+            .map(|s| s.has_pushed_image)
+            .unwrap_or(false),
         script,
         plugins_arcgis: Some(res_arcgis),
         plugins_qgis: Some(res_qgis),
@@ -1069,9 +1120,10 @@ pub async fn delete_worker(name: Option<&str>) -> Result<()> {
     settings.unregister_worker(&worker_name)?;
     settings.save()?;
 
-    // Clean up state file and saved config
+    // Clean up state file, saved config, and saves directory
     state::delete_state(&worker_name)?;
     yaml_store::delete_saved_config(&worker_name)?;
+    yaml_store::delete_saves_dir(&worker_name)?;
 
     // Touch QGIS refresh trigger so the plugin auto-reloads tools after delete
     touch_qgis_refresh_trigger();
@@ -1094,14 +1146,21 @@ pub async fn run_worker(
     input_args: &[String],
     json_output: bool,
     dev: bool,
+    ver: Option<&str>,
     extra_args: &[String],
 ) -> Result<()> {
     // Resolve worker name and path
     let (worker_name, worker_path) = resolve_worker(worker)?;
-    let config = yaml_store::load_saved_config(&worker_name)?;
 
-    // Update if version changed
-    let this_ver = config.version;
+    // Load config — if --ver is specified, load the snapshotted config for that version
+    let (config, run_ver) = if let Some(v) = ver {
+        let config = load_versioned_config(&worker_name, v)?;
+        (config, v.to_string())
+    } else {
+        let config = yaml_store::load_saved_config(&worker_name)?;
+        let run_ver = config.version.clone();
+        (config, run_ver)
+    };
 
     // Get command config
     let cmd_config = config
@@ -1423,7 +1482,7 @@ pub async fn run_worker(
     let image_tag = if dev {
         format!("geoengine-local-dev/{}:latest", config.name)
     } else {
-        format!("geoengine-local/{}:{}", config.name, this_ver)
+        format!("geoengine-local/{}:{}", config.name, run_ver)
     };
     let container_config = ContainerConfig {
         image: image_tag,
@@ -1514,9 +1573,14 @@ pub async fn run_worker(
 // geoengine describe
 // ---------------------------------------------------------------------------
 
-pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
+pub async fn describe_worker(
+    worker: Option<&str>,
+    json: bool,
+    dev: bool,
+    ver: Option<&str>,
+) -> Result<()> {
     let (worker_name, _worker_path) = resolve_worker(worker)?;
-    let config = yaml_store::load_saved_config(&worker_name)?;
+    let config = load_describe_config(&worker_name, dev, ver)?;
     let inputs = config
         .command
         .as_ref()
@@ -1554,6 +1618,11 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
         .as_ref()
         .and_then(|s| s.command_hash.as_ref().map(|h| short_hash(h)));
 
+    // Load available versions from map.json (no Docker needed)
+    let available_versions = load_available_versions(&worker_name)
+        .ok()
+        .filter(|versions| !versions.is_empty());
+
     let desc = WorkerDescription {
         name: config.name.clone(),
         description: config.description.clone(),
@@ -1564,15 +1633,16 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
         built_at,
         yaml_hash,
         script_hash,
+        available_versions,
     };
 
     if json {
         println!("{}", serde_json::to_string(&desc)?);
     } else {
         println!();
-        println!("{:<13}: {}", "WORKER".bold(), desc.name);
+        println!("{:<18}: {}", "WORKER".bold(), desc.name);
         println!(
-            "{:<13}: {}",
+            "{:<18}: {}",
             "DESCRIPTION".bold(),
             match desc.description {
                 Some(d) => d.normal(),
@@ -1582,7 +1652,7 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
         match desc.version {
             Some(v) => {
                 println!(
-                    "{:<13}: {} {}",
+                    "{:<18}: {} {}",
                     "VERSION".bold(),
                     v,
                     if validate_version(&v).is_ok() {
@@ -1591,61 +1661,64 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
                         "✗".red()
                     }
                 );
-                let built_ver = desc.version_built;
-                if built_ver.is_none() {
-                    match validate_version(&v) {
-                        Ok(_) => {
-                            println!(
-                                "{:<13}: {} {}",
-                                "IMAGE VERSION".bold(),
-                                "not built",
-                                "↻".yellow()
-                            );
-                            println!(
-                                "{}{}",
-                                " ".repeat(15),
-                                "Run `geoengine build` to build pushable image."
-                                    .italic()
-                                    .yellow()
-                            );
+                if dev {
+                    let built_ver = desc.version_built;
+                    if built_ver.is_none() {
+                        match validate_version(&v) {
+                            Ok(_) => {
+                                println!(
+                                    "{:<18}: {} {}",
+                                    "LATEST VERSION".bold(),
+                                    "not built",
+                                    "↻".yellow()
+                                );
+                                println!(
+                                    "{}{}",
+                                    " ".repeat(15),
+                                    "Run `geoengine build` to build pushable image."
+                                        .italic()
+                                        .yellow()
+                                );
+                            }
+                            Err(e) => {
+                                println!("{:<18}: {}", "LATEST VERSION".bold(), "not built");
+                                println!("{}{}", " ".repeat(15), e.italic().red());
+                            }
                         }
-                        Err(e) => {
-                            println!("{:<13}: {}", "IMAGE VERSION".bold(), "not built");
-                            println!("{}{}", " ".repeat(15), e.italic().red());
-                        }
-                    }
-                } else {
-                    let version_cmp = compare_versions(
-                        &config.version.clone(),
-                        built_ver.clone().unwrap().as_ref(),
-                    );
-                    match version_cmp {
-                        Ok(order) => {
-                            match order {
+                    } else {
+                        let version_cmp = compare_versions(
+                            &config.version.clone(),
+                            built_ver.clone().unwrap().as_ref(),
+                        );
+                        match version_cmp {
+                            Ok(order) => match order {
                                 Ordering::Equal => {
                                     println!(
-                                        "{:<13}: {} {}",
-                                        "IMAGE VERSION".bold(),
+                                        "{:<18}: {} {}",
+                                        "LATEST VERSION".bold(),
                                         built_ver.unwrap(),
                                         "✓".green()
                                     );
                                 }
                                 Ordering::Greater => {
                                     println!(
-                                        "{:<13}: {} {}",
-                                        "IMAGE VERSION".bold(),
+                                        "{:<18}: {} {}",
+                                        "LATEST VERSION".bold(),
                                         built_ver.unwrap(),
                                         "↻".yellow()
                                     );
-                                    println!("{}{}",
-                                         " ".repeat(15),
-                                         "New version available. Run `geoengine build` to update image.".italic().yellow()
-                                );
+                                    println!(
+                                        "{}{}",
+                                        " ".repeat(15),
+                                        "New version available. Run `geoengine build` to update image."
+                                            .italic()
+                                            .yellow()
+                                    );
                                 }
                                 Ordering::Less => {
                                     println!(
-                                        "{:<13}: {} {}",
-                                        "IMAGE VERSION".bold(),
+                                        "{:<18}: {} {}",
+                                        "LATEST VERSION".bold(),
                                         built_ver.unwrap(),
                                         "✗".red()
                                     );
@@ -1657,11 +1730,11 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
                                             .red()
                                     );
                                 }
+                            },
+                            Err(e) => {
+                                println!("{:<18}: {}", "LATEST VERSION".bold(), built_ver.unwrap(),);
+                                println!("{}{}", " ".repeat(15), e.italic().red());
                             }
-                        }
-                        Err(e) => {
-                            println!("{:<13}: {}", "IMAGE VERSION".bold(), built_ver.unwrap(),);
-                            println!("{}{}", " ".repeat(15), e.italic().red());
                         }
                     }
                 }
@@ -1674,6 +1747,13 @@ pub async fn describe_worker(worker: Option<&str>, json: bool) -> Result<()> {
                     .red()
             ),
         };
+        if let Some(ref versions) = desc.available_versions {
+            println!(
+                "{:<18}: {}",
+                "AVAILABLE VERSIONS".bold(),
+                versions.join(", ")
+            );
+        }
         // Compute column widths dynamically
         let name_w = desc
             .inputs
@@ -1838,11 +1918,20 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
                 }
                 None => {}
             }
+            let worker_state = state::load_state(name).ok().flatten();
             entries.push(WorkerListEntry {
                 name: name.to_string(),
                 path: path.display().to_string(),
                 has_tool,
                 found: path.join("geoengine.yaml").exists(),
+                has_dev_image: worker_state
+                    .as_ref()
+                    .map(|s| s.has_dev_image)
+                    .unwrap_or(false),
+                has_pushed_image: worker_state
+                    .as_ref()
+                    .map(|s| s.has_pushed_image)
+                    .unwrap_or(false),
                 description,
             });
         }
@@ -1864,6 +1953,8 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
         .unwrap_or(5)
         .max(7);
     let found_w = 5; // "FOUND"
+    let dev_w = 3; // "DEV"
+    let pushed_w = 6; // "PUSHED"
     let path_w = workers
         .iter()
         .map(|(_, p)| p.display().to_string().len())
@@ -1872,15 +1963,22 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
 
     println!();
     println!(
-        "{:<name_w$} {:<found_w$}   {:<path_w$}",
+        "{:<name_w$} {:<found_w$} {:<dev_w$} {:<pushed_w$}   {:<path_w$}",
         "NAME".bold(),
         "FOUND".bold(),
+        "DEV".bold(),
+        "PUSHED".bold(),
         "PATH".bold(),
         name_w = name_w,
         found_w = found_w,
+        dev_w = dev_w,
+        pushed_w = pushed_w,
         path_w = path_w
     );
-    println!("{}", "-".repeat(name_w + found_w + path_w + 4));
+    println!(
+        "{}",
+        "-".repeat(name_w + found_w + dev_w + pushed_w + path_w + 6)
+    );
 
     for (name, path) in workers {
         let applied = if yaml_store::load_saved_config(name).is_ok() {
@@ -1893,13 +1991,36 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
         } else {
             "✗".red()
         };
+        let worker_state = state::load_state(name).ok().flatten();
+        let has_dev = if worker_state
+            .as_ref()
+            .map(|s| s.has_dev_image)
+            .unwrap_or(false)
+        {
+            "yes".green()
+        } else {
+            "no".red()
+        };
+        let has_pushed = if worker_state
+            .as_ref()
+            .map(|s| s.has_pushed_image)
+            .unwrap_or(false)
+        {
+            "yes".green()
+        } else {
+            "no".red()
+        };
         println!(
-            "{} {:<name_w$} {}       {}",
+            "{} {:<name_w$} {:<5} {:<dev_w$} {:<pushed_w$}   {}",
             applied,
             name,
             found,
+            has_dev,
+            has_pushed,
             path.display(),
-            name_w = name_w - 2
+            name_w = name_w - 2,
+            dev_w = dev_w,
+            pushed_w = pushed_w
         );
     }
     println!();
@@ -2079,6 +2200,85 @@ fn short_hash(h: &str) -> String {
     } else {
         h.chars().take(12).collect()
     }
+}
+
+fn load_worker_version_mappings(worker_name: &str) -> Result<HashMap<String, String>> {
+    let map = VersionConfigMaps::load_from_worker(worker_name).with_context(|| {
+        format!(
+            "No version snapshots found for worker '{}'. Run 'geoengine build' to create versioned builds.",
+            worker_name
+        )
+    })?;
+
+    Ok(map.mappings.unwrap_or_default())
+}
+
+fn sort_worker_versions(mut versions: Vec<String>) -> Vec<String> {
+    versions.sort_by(|a, b| {
+        compare_versions(a, b)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.cmp(b))
+    });
+    versions
+}
+
+fn load_available_versions(worker_name: &str) -> Result<Vec<String>> {
+    Ok(sort_worker_versions(
+        load_worker_version_mappings(worker_name)?
+            .into_keys()
+            .collect(),
+    ))
+}
+
+fn load_versioned_config(worker_name: &str, version: &str) -> Result<WorkerConfig> {
+    let saves_dir = yaml_store::get_worker_saves_dir(worker_name)?;
+    let mappings = load_worker_version_mappings(worker_name)?;
+    if mappings.is_empty() {
+        anyhow::bail!(
+            "No versions have been built for worker '{}'. Run 'geoengine build' first.",
+            worker_name
+        );
+    }
+
+    let available = sort_worker_versions(mappings.keys().cloned().collect());
+    let content_hash = mappings.get(version).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Version '{}' not found for worker '{}'. Available versions: {:?}",
+            version,
+            worker_name,
+            available
+        )
+    })?;
+
+    let snapshot_path = saves_dir.join(format!("{}.json", content_hash));
+    let relevant = RelevantWorkerConfig::load_json(&snapshot_path).with_context(|| {
+        format!(
+            "Failed to load config snapshot for version '{}' (hash: {})",
+            version, content_hash
+        )
+    })?;
+
+    Ok(relevant.reconstruct_full_config(worker_name, version))
+}
+
+fn load_describe_config(worker_name: &str, dev: bool, ver: Option<&str>) -> Result<WorkerConfig> {
+    if dev {
+        return yaml_store::load_saved_config(worker_name);
+    }
+
+    if let Some(version) = ver {
+        return load_versioned_config(worker_name, version);
+    }
+
+    let available = load_available_versions(worker_name)?;
+    let latest = available.last().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No versions have been built for worker '{}'. Run 'geoengine build' first, or use 'geoengine describe --dev'.",
+            worker_name
+        )
+    })?;
+
+    load_versioned_config(worker_name, latest)
 }
 
 // ---------------------------------------------------------------------------

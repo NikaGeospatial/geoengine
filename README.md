@@ -73,6 +73,7 @@ Hence, please make sure to apply your changes **before** building or running a w
 - If only the version changed but no files changed, the build is skipped with a notice.
 - If files changed but the version was not incremented, the build is rejected — bump the version in `geoengine.yaml` first (non-dev mode only).
 - Use `--no-cache` to bypass change detection and force a full rebuild.
+- After each successful production build (non-dev), GeoEngine snapshots the current worker config to `~/.geoengine/saves/{worker}/` and maps the version to that snapshot, enabling `geoengine run --ver <VERSION>`.
 
 ### Build a Docker Image
 
@@ -104,6 +105,9 @@ geoengine run --dev --input input-file=/path/to/image.tif --input model=resnet50
 
 # Run a named worker using its latest production image
 geoengine run my-worker --input input-file=/path/to/image.tif
+
+# Run a specific previously-built version (loads snapshotted config for that version)
+geoengine run my-worker --ver 1.0.0 --input input-file=/path/to/image.tif
 
 # JSON output mode (logs go to stderr, structured result on stdout)
 geoengine run my-worker --json --input input-file=/path/to/image.tif
@@ -173,8 +177,14 @@ geoengine workers --json
 # List workers registered in ArcGIS plugin (for programmatic use)
 geoengine workers --gis arcgis
 
-# Describes a worker's name, version, and parameters (defaults to current directory if worker name is not specified)
+# Describe the latest built version for a worker (includes available versions from saves)
 geoengine describe my-worker
+
+# Describe the current applied development config
+geoengine describe my-worker --dev
+
+# Describe a specific built version
+geoengine describe my-worker --ver 1.2.3
 
 # Delete a worker (removes registration, saved config and state)
 geoengine delete --name my-worker
@@ -182,6 +192,11 @@ geoengine delete --name my-worker
 # Delete the worker in the current directory
 geoengine delete
 ```
+
+`geoengine workers --json` entries include:
+- `name`, `path`, `has_tool`, `found`, `description`
+- `has_dev_image` — whether `geoengine-local-dev/<worker>:latest` exists locally
+- `has_pushed_image` — whether any `geoengine-local/<worker>:<version>` image exists locally
 
 ### Patch GeoEngine Artifacts
 
@@ -193,11 +208,13 @@ geoengine patch
 
 It checks and repairs the following:
 - Global artifacts
+  - Worker state image flags — before state validation, patches `state/*.yaml` to reflect local Docker image presence via `has_dev_image` and `has_pushed_image`
 - Worker artifacts
   - Worker path — warns if the registered path no longer exists on disk
   - `geoengine.yaml` — validates schema (read-only, never modified)
   - `pixi.toml` — warns if missing (read-only, never modified)
   - `Dockerfile` and `.dockerignore` — compares content against the current canonical template; silently regenerates if stale or missing
+  - Saves migration — if `~/.geoengine/saves/{worker}/map.json` does not yet exist, initializes it and tags previously-built release image versions to the current saved config snapshot so that `geoengine run --ver <VERSION>` works for those versions. If `map.json` already exists, this migration step is skipped for that worker. Then validates the saves directory structure (map.json parses correctly, all referenced snapshots exist, no orphaned files).
 - GIS plugins
 - Agent skills — syncs the GeoEngine skills from the local `skills/` directory into each installed agent's skills folder (`~/.claude/skills` for Claude, `~/.codex/skills` for Codex). Skills are compared by SHA-256 hash: changed or missing skills are updated, identical skills are skipped. Agents not installed on the machine are silently skipped.
 
@@ -220,8 +237,9 @@ geoengine image list
 # Import from tarball (air-gapped)
 geoengine image import my-image.tar --tag my-image:latest
 
-# Remove an image
-geoengine image remove my-image:latest
+# Remove an image (also removes the version entry from saves map and deletes the
+# config snapshot if no other version references it)
+geoengine image remove geoengine-local/my-worker:1.0.0
 ```
 
 ### Global Environment Variables
@@ -269,6 +287,17 @@ The following situations will throw errors when attempting to rebuild.
 
 A valid SemVer version string must include all three components: `MAJOR.MINOR.PATCH`.
 Follow versioning rules to avoid unexpected errors.
+
+### Version Snapshots
+
+Each successful production build (`geoengine build`, without `--dev`) snapshots the worker configuration to `~/.geoengine/saves/{worker}/`. A `map.json` file tracks the mapping from version number to configuration snapshot. This allows you to reproduce any previously-built version exactly:
+
+```bash
+# Run a specific previously-built version with its snapshotted configuration
+geoengine run my-worker --ver 1.0.0 --input input-file=/data/raster.tif
+```
+
+If `--ver` is omitted, `geoengine run` uses the latest applied configuration. Running `geoengine patch` will initialize saves/version mappings only for workers whose `~/.geoengine/saves/{worker}/map.json` is missing, and then tag any previously-built Docker image versions once to the current saved config snapshot.
 
 
 ## Worker Configuration
@@ -375,7 +404,7 @@ Refer to the [YAML configuration documentation](docs/YAML_CONFIG.md) for a compl
 How it works:
 - Plugins are installed by `geoengine apply` based on the `plugins` section in `geoengine.yaml` if not already installed
 - Run `geoengine patch` after a GeoEngine upgrade to automatically reinstall any stale plugin files
-- **Discovery**: Plugins call `geoengine workers --json` to list workers, then `geoengine describe <worker> --json` to get each worker's parameter definitions as JSON
+- **Discovery**: Plugins call `geoengine workers --json` to list workers (including `has_dev_image` and `has_pushed_image`), then `geoengine describe <worker> --json` to get each worker's parameter definitions as JSON
 - **Execution**: Plugins invoke `geoengine run <worker> --json --input KEY=VALUE` as a subprocess
 - Container logs stream to stderr in real-time (displayed as progress in the GIS UI)
 - On completion, a JSON result with status and output file paths is printed to stdout
@@ -418,7 +447,7 @@ CUDA is not available on macOS. PyTorch will automatically use the MPS (Metal) b
 | `geoengine diff [--file all\|config\|dockerfile\|worker]`      | Check which tracked files have changed since last apply                                     |
 | `geoengine delete [--name <worker>]`                           | Delete a worker, clean up state and saved configuration                                     |
 | `geoengine workers [--json] [--gis arcgis\|qgis]`              | List registered workers                                                                     |
-| `geoengine describe [<worker>] [--json]`                       | Displays information from saved configuration file of specified worker                      |
+| `geoengine describe [<worker>] [--json] [--dev] [--ver VERSION]` | Displays information from the latest built config by default, or the dev config with `--dev` |
 | `geoengine patch`                                              | Validate all artifacts, regenerate stale Dockerfiles, reinstall stale GIS plugins, and sync agent skills |
 | `geoengine update`                                             | Update GeoEngine to the latest version via the original install method, then automatically run `geoengine patch` |
 | `geoengine image list\|import\|remove`                         | Manage Docker images                                                                        |
