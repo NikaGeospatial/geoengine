@@ -4,6 +4,8 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
+use crate::config::worker::VersionConfigMaps;
+use crate::config::yaml_store::get_worker_saves_dir;
 use crate::docker::client::DockerClient;
 
 #[derive(Subcommand)]
@@ -96,8 +98,9 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
 
     println!("{}{}", " ".repeat(38), "PUSHED IMAGES".bold());
     println!(
-        "{:<50} {:<20} {:<15} {}",
-        "REPOSITORY:TAG".bold(),
+        "{:<41} {:<8} {:<20} {:<15} {}",
+        "WORKER".bold(),
+        "VERSION".bold(),
         "IMAGE ID".bold(),
         "SIZE".bold(),
         "CREATED".bold()
@@ -105,18 +108,26 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
     println!("{}", "-".repeat(100));
 
     for image in &images {
-        let repo_tag = image
+        let tags = image
             .repo_tags
             .iter()
-            .filter(|t| !t.starts_with("geoengine-local-dev/"))
-            .map(|s| s.as_str())
-            .collect::<Vec<&str>>();
+            .filter(|t| t.starts_with("geoengine-local/"))
+            .map(|s| {
+                s.as_str()
+                    .trim_start_matches("geoengine-local/")
+                    .split_once(":")
+                    .unwrap_or((s, "latest"))
+            })
+            .collect::<Vec<(&str, &str)>>();
         let id = short_image_id(&image.id);
         let size = format_size(image.size);
         let created = format_timestamp(image.created);
 
-        for tag in repo_tag {
-            println!("{:<50} {:<20} {:<15} {}", tag, id, size, created);
+        for (worker, ver) in tags {
+            println!(
+                "{:<41} {:<8} {:<20} {:<15} {}",
+                worker, ver, id, size, created
+            );
         }
     }
 
@@ -124,7 +135,7 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
     println!("{}{}", " ".repeat(40), "DEV IMAGES".bold());
     println!(
         "{:<50} {:<20} {:<15} {}",
-        "REPOSITORY:TAG".bold(),
+        "WORKER".bold(),
         "IMAGE ID".bold(),
         "SIZE".bold(),
         "CREATED".bold()
@@ -132,17 +143,21 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
     println!("{}", "-".repeat(100));
 
     for image in &images {
-        let repo_tag = image
+        let worker = image
             .repo_tags
             .iter()
             .filter(|t| t.starts_with("geoengine-local-dev/"))
-            .map(|s| s.as_str())
+            .map(|s| {
+                s.as_str()
+                    .trim_start_matches("geoengine-local-dev/")
+                    .trim_end_matches(":latest")
+            })
             .collect::<Vec<&str>>();
         let id = short_image_id(&image.id);
         let size = format_size(image.size);
         let created = format_timestamp(image.created);
 
-        for tag in repo_tag {
+        for tag in worker {
             println!("{:<50} {:<20} {:<15} {}", tag, id, size, created);
         }
     }
@@ -164,7 +179,72 @@ async fn remove_image(client: &DockerClient, image: &str, force: bool) -> Result
         image.cyan()
     );
 
+    // Clean up the version mapping from saves if this is a geoengine-local release image
+    if let Some(rest) = image.strip_prefix("geoengine-local/") {
+        if let Some((worker_name, version)) = rest.split_once(':') {
+            remove_version_from_saves(worker_name, version);
+        }
+    }
+
     Ok(())
+}
+
+fn remove_version_from_saves(worker_name: &str, version: &str) {
+    let saves_dir = match get_worker_saves_dir(worker_name) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    let mut map = match VersionConfigMaps::load_from_worker(worker_name) {
+        Ok(m) => m,
+        Err(_) => return, // no saves for this worker; nothing to clean
+    };
+
+    let mut mappings = map.mappings.unwrap_or_default();
+
+    // Get the hash before removing so we can check if it's still referenced
+    let removed_hash = mappings.remove(version);
+    map.mappings = if mappings.is_empty() {
+        None
+    } else {
+        Some(mappings.clone())
+    };
+
+    if let Err(e) = map.save_to_worker(worker_name) {
+        eprintln!("{} Failed to update saves map: {}", "!".yellow().bold(), e);
+        return;
+    }
+
+    println!(
+        "  {} Removed version '{}' from saves map for worker '{}'",
+        "✓".green().bold(),
+        version,
+        worker_name
+    );
+
+    // If the removed hash is no longer referenced by any other version, delete the snapshot
+    if let Some(hash) = removed_hash {
+        let still_referenced = mappings.values().any(|h| h == &hash);
+        if !still_referenced {
+            let snapshot = saves_dir.join(format!("{}.json", hash));
+            if snapshot.exists() {
+                if let Err(e) = std::fs::remove_file(&snapshot) {
+                    eprintln!(
+                        "  {} Failed to delete snapshot file: {}",
+                        "!".yellow().bold(),
+                        e
+                    );
+                } else {
+                    let short_hash = &hash[..12.min(hash.len())];
+                    println!(
+                        "  {} Deleted unreferenced config snapshot ({})",
+                        "✓".green().bold(),
+                        short_hash
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn format_size(bytes: i64) -> String {
@@ -197,5 +277,154 @@ fn short_image_id(image_id: &str) -> String {
         "<none>".to_string()
     } else {
         short
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(500), "500 B");
+    }
+
+    #[test]
+    fn test_format_size_kilobytes() {
+        assert_eq!(format_size(1024), "1.00 KB");
+        assert_eq!(format_size(2048), "2.00 KB");
+        assert_eq!(format_size(1536), "1.50 KB");
+    }
+
+    #[test]
+    fn test_format_size_megabytes() {
+        assert_eq!(format_size(1024 * 1024), "1.00 MB");
+        assert_eq!(format_size(5 * 1024 * 1024), "5.00 MB");
+        assert_eq!(format_size(1536 * 1024), "1.50 MB");
+    }
+
+    #[test]
+    fn test_format_size_gigabytes() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.00 GB");
+        assert_eq!(format_size(3584 * 1024 * 1024), "3.50 GB");
+    }
+
+    #[test]
+    fn test_format_size_zero() {
+        assert_eq!(format_size(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_timestamp() {
+        // Test a known timestamp: 2024-01-01 00:00:00 UTC
+        let timestamp = 1704067200;
+        let formatted = format_timestamp(timestamp);
+        assert_eq!(formatted, "2024-01-01 00:00");
+    }
+
+    #[test]
+    fn test_format_timestamp_recent() {
+        // Test a more recent timestamp: 2025-01-15 12:30:00 UTC
+        let timestamp = 1736944200;
+        let formatted = format_timestamp(timestamp);
+        assert_eq!(formatted, "2025-01-15 12:30");
+    }
+
+    #[test]
+    fn test_format_timestamp_invalid() {
+        // Test with invalid timestamp
+        let formatted = format_timestamp(-1);
+        assert_eq!(formatted, "Unknown");
+    }
+
+    #[test]
+    fn test_short_image_id_with_prefix() {
+        let id = "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        let short = short_image_id(id);
+        assert_eq!(short, "abcdef123456");
+        assert_eq!(short.len(), 12);
+    }
+
+    #[test]
+    fn test_short_image_id_without_prefix() {
+        let id = "abcdef1234567890abcdef1234567890";
+        let short = short_image_id(id);
+        assert_eq!(short, "abcdef123456");
+        assert_eq!(short.len(), 12);
+    }
+
+    #[test]
+    fn test_short_image_id_short_input() {
+        let id = "abc123";
+        let short = short_image_id(id);
+        assert_eq!(short, "abc123");
+    }
+
+    #[test]
+    fn test_short_image_id_empty() {
+        let id = "";
+        let short = short_image_id(id);
+        assert_eq!(short, "<none>");
+    }
+
+    #[test]
+    fn test_short_image_id_only_prefix() {
+        let id = "sha256:";
+        let short = short_image_id(id);
+        assert_eq!(short, "<none>");
+    }
+
+    #[test]
+    fn test_remove_version_from_saves_basic() {
+        // This is a unit test that verifies the logic without Docker/filesystem side effects
+        // The function itself modifies the filesystem, so we test it indirectly
+        let worker_name = "test-worker";
+        let version = "1.0.0";
+
+        // The function should handle gracefully when worker doesn't exist
+        remove_version_from_saves(worker_name, version);
+        // If it doesn't panic, the test passes
+    }
+
+    #[test]
+    fn test_format_size_boundary_values() {
+        // Test boundary between KB and MB
+        let kb_boundary = 1024 * 1024 - 1;
+        let result = format_size(kb_boundary);
+        assert!(result.contains("KB"));
+
+        let mb_boundary = 1024 * 1024;
+        let result = format_size(mb_boundary);
+        assert!(result.contains("MB"));
+    }
+
+    #[test]
+    fn test_format_size_boundary_gb() {
+        // Test boundary between MB and GB
+        let mb_boundary = 1024 * 1024 * 1024 - 1;
+        let result = format_size(mb_boundary);
+        assert!(result.contains("MB"));
+
+        let gb_boundary = 1024 * 1024 * 1024;
+        let result = format_size(gb_boundary);
+        assert!(result.contains("GB"));
+    }
+
+    #[test]
+    fn test_short_image_id_exactly_12_chars() {
+        let id = "123456789012";
+        let short = short_image_id(id);
+        assert_eq!(short, "123456789012");
+        assert_eq!(short.len(), 12);
+    }
+
+    #[test]
+    fn test_short_image_id_unicode() {
+        // Test with unicode characters
+        let id = "🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥extra";
+        let short = short_image_id(id);
+        // Takes first 12 unicode characters
+        assert_eq!(short.chars().count(), 12);
     }
 }

@@ -1,11 +1,13 @@
 use anyhow::Result;
 use colored::Colorize;
+use semver::Version;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::cli::plugins::{self, PluginPatchResult};
 use crate::config::settings::Settings;
 use crate::config::state;
-use crate::config::worker::WorkerConfig;
+use crate::config::worker::{RelevantWorkerConfig, VersionConfigMaps, WorkerConfig};
 use crate::config::yaml_store;
 use crate::docker::dockerfile;
 use crate::utils::paths;
@@ -15,11 +17,12 @@ fn print_summary(
     dockerfiles_updated: usize,
     plugins_updated: usize,
     skills_updated: usize,
+    migrations_applied: usize,
     issues: &[String],
 ) {
     let issue_count = issues.len();
     println!(
-        "{} {} worker{} checked, {} Dockerfile{} updated, {} plugin{} updated, {} skill{} synced, {} issue{} found.",
+        "{} {} worker{} checked, {} Dockerfile{} updated, {} plugin{} updated, {} skill{} synced, {} migration{} applied, {} issue{} found.",
         "Patch complete:".bold(),
         workers_checked,
         if workers_checked == 1 { "" } else { "s" },
@@ -29,10 +32,17 @@ fn print_summary(
         if plugins_updated == 1 { "" } else { "s" },
         skills_updated,
         if skills_updated == 1 { "" } else { "s" },
+        migrations_applied,
+        if migrations_applied == 1 { "" } else { "s" },
         issue_count,
         if issue_count == 1 { "" } else { "s" },
     );
-    if dockerfiles_updated > 0 || plugins_updated > 0 || skills_updated > 0 || issue_count > 0 {
+    if dockerfiles_updated > 0
+        || plugins_updated > 0
+        || skills_updated > 0
+        || migrations_applied > 0
+        || issue_count > 0
+    {
         println!();
         println!("{}", "TO-DOs:".bold());
         if issue_count > 0 {
@@ -61,6 +71,23 @@ fn print_summary(
                 if skills_updated == 1 { "" } else { "s" },
             )
         }
+        if migrations_applied > 0 {
+            println!(
+                "  {} Versions tagged from current config snapshots — run 'geoengine build' to create fresh snapshots for the current configs.",
+                "!".yellow().bold(),
+            )
+        }
+    }
+}
+
+fn print_patch_warnings(warnings: &HashSet<String>) {
+    if warnings.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", "Patch warnings:".bold());
+    for warning in warnings {
+        println!("  {} {}", "!".yellow().bold(), warning);
     }
 }
 
@@ -115,9 +142,11 @@ enum V2WorkerFlow {
 /// Main central context for the v2 patch pipeline.
 struct PatchV2Ctx {
     issues: Vec<String>,
+    warnings: HashSet<String>,
     dockerfiles_updated: usize,
     plugins_updated: usize,
     skills_updated: usize,
+    migrations_applied: usize,
     workers_checked: usize,
     settings: Option<Settings>,
     canonical_dockerfile: String,
@@ -128,9 +157,11 @@ impl PatchV2Ctx {
     fn new() -> Self {
         Self {
             issues: Vec::new(),
+            warnings: HashSet::new(),
             dockerfiles_updated: 0,
             plugins_updated: 0,
             skills_updated: 0,
+            migrations_applied: 0,
             workers_checked: 0,
             settings: None,
             canonical_dockerfile: dockerfile::canonical_dockerfile_content(),
@@ -142,6 +173,10 @@ impl PatchV2Ctx {
         self.settings
             .as_ref()
             .ok_or_else(|| anyhow!("settings were not loaded before dependent checks"))
+    }
+
+    fn add_warning(&mut self, msg: impl Into<String>) {
+        self.warnings.insert(msg.into());
     }
 }
 
@@ -252,6 +287,7 @@ const V2_GLOBAL_CHECKS: &[V2GlobalCheckFn] = &[v2_load_settings];
 
 /// Check worker-specific states.
 const V2_STATE_CHECKS: &[V2StateCheckFn] = &[
+    v2_migrate_state_image_flags_from_docker,
     v2_validate_state_parse,
     v2_validate_state_orphan,
     v2_remove_state_image_tag_no_dev,
@@ -266,6 +302,8 @@ const V2_WORKER_CHECKS: &[V2WorkerCheckFn] = &[
     v2_validate_worker_yaml,
     v2_validate_worker_pixi,
     v2_patch_worker_docker_artifacts,
+    v2_generate_worker_saves,
+    v2_validate_worker_saves,
 ];
 
 /// Check GIS plugin artifacts.
@@ -294,10 +332,6 @@ pub async fn patch_all_v2() -> Result<()> {
         .filter_map(|e| e.ok().map(|d| d.path()))
         .filter(|p| p.extension().is_some_and(|ext| ext == "yaml"))
         .collect();
-
-    if !state_entries.is_empty() {
-        println!("\n{}", "Checking state files...".bold());
-    }
 
     for path in &state_entries {
         let stem = path
@@ -358,12 +392,14 @@ pub async fn patch_all_v2() -> Result<()> {
     println!("\n{}", "Checking agent skills...".bold());
     v2_run_skills_checks(&mut ctx).await?;
 
+    print_patch_warnings(&ctx.warnings);
     println!();
     print_summary(
         ctx.workers_checked,
         ctx.dockerfiles_updated,
         ctx.plugins_updated,
         ctx.skills_updated,
+        ctx.migrations_applied,
         &ctx.issues,
     );
 
@@ -401,6 +437,7 @@ fn v2_load_settings(ctx: &'_ mut PatchV2Ctx) -> BoxFuture<'_, Result<V2PatchFlow
                     ctx.dockerfiles_updated,
                     0,
                     0,
+                    0,
                     &ctx.issues,
                 );
                 Ok(V2PatchFlow::AbortPatch)
@@ -415,6 +452,71 @@ fn v2_load_settings(ctx: &'_ mut PatchV2Ctx) -> BoxFuture<'_, Result<V2PatchFlow
 // - stem (stem of worker state file)
 // - worker_state (worker state)
 // -------------------------------------------------------------------------------------------------
+
+/// # Migration from v0.4.5.
+/// Derive `has_dev_image` and `has_pushed_image` from local Docker image tags.
+fn v2_migrate_state_image_flags_from_docker<'a>(
+    ctx: &'a mut PatchV2Ctx,
+    stem: &'a str,
+    worker_state: &'a mut state::WorkerState,
+) -> BoxFuture<'a, Result<V2StateFlow>> {
+    Box::pin(async move {
+        let docker = match DockerClient::new().await {
+            Ok(docker) => docker,
+            Err(e) => {
+                println!(
+                    "  {} Could not connect to Docker while patching state/{}.yaml image flags: {}. Skipping.",
+                    "!".yellow().bold(),
+                    stem,
+                    e
+                );
+                return Ok(V2StateFlow::Continue);
+            }
+        };
+
+        let images = match docker.list_images(Some(stem), true).await {
+            Ok(images) => images,
+            Err(e) => {
+                println!(
+                    "  {} Failed to list Docker images while patching state/{}.yaml image flags: {}. Skipping.",
+                    "!".yellow().bold(),
+                    stem,
+                    e
+                );
+                return Ok(V2StateFlow::Continue);
+            }
+        };
+
+        let dev_tag = format!("geoengine-local-dev/{}:latest", stem);
+        let pushed_prefix = format!("geoengine-local/{}:", stem);
+        let has_dev_image = images
+            .iter()
+            .flat_map(|img| img.repo_tags.iter())
+            .any(|tag| tag == &dev_tag);
+        let has_pushed_image = images
+            .iter()
+            .flat_map(|img| img.repo_tags.iter())
+            .any(|tag| tag.starts_with(&pushed_prefix));
+
+        if worker_state.has_dev_image != has_dev_image
+            || worker_state.has_pushed_image != has_pushed_image
+        {
+            worker_state.has_dev_image = has_dev_image;
+            worker_state.has_pushed_image = has_pushed_image;
+            state::save_state(worker_state)?;
+            ctx.migrations_applied += 1;
+            println!(
+                "  {} Updated image flags in state/{}.yaml (dev: {}, pushed: {})",
+                "✓".green().bold(),
+                stem,
+                has_dev_image,
+                has_pushed_image
+            );
+        }
+
+        Ok(V2StateFlow::Continue)
+    })
+}
 
 /// Validates if a saved worker state is a valid YAML.
 fn v2_validate_state_parse<'a>(
@@ -673,6 +775,186 @@ fn v2_patch_worker_docker_artifacts<'a>(
             }
         } else {
             println!("    {} Dockerfile and .dockerignore up-to-date", "•".cyan());
+        }
+
+        Ok(V2WorkerFlow::Continue)
+    })
+}
+
+/// # Migration from v0.4.5.
+/// Ensures the saves directory and map.json exist for a worker, then tags all
+/// found release Docker image versions to the current saved config snapshot.
+fn v2_generate_worker_saves<'a>(
+    ctx: &'a mut PatchV2Ctx,
+    name: &'a str,
+    _worker_path: &'a Path,
+) -> BoxFuture<'a, Result<V2WorkerFlow>> {
+    Box::pin(async move {
+        let saves_dir = yaml_store::get_worker_saves_dir(name)?;
+        let map_path = saves_dir.join("map.json");
+
+        // Skip migration entirely once map.json already exists.
+        if map_path.exists() {
+            return Ok(V2WorkerFlow::Continue);
+        }
+
+        // Initialize saves dir + map.json, then tag existing release images once.
+        std::fs::create_dir_all(&saves_dir)?;
+        VersionConfigMaps {
+            worker: name.to_string(),
+            mappings: None,
+        }
+        .save_to_worker(name)?;
+        println!("    {} Initialized saves directory", "✓".green().bold());
+
+        // Connect to Docker to discover release images
+        let docker = match DockerClient::new().await {
+            Ok(d) => d,
+            Err(e) => {
+                println!(
+                    "    {} Could not connect to Docker; skipping version tagging for '{}': {}",
+                    "!".yellow().bold(),
+                    name,
+                    e
+                );
+                return Ok(V2WorkerFlow::Continue);
+            }
+        };
+
+        // Collect all valid semver release versions from local Docker images
+        let prefix = format!("geoengine-local/{}:", name);
+        let images = docker
+            .list_images(Some(&format!("geoengine-local/{}", name)), true)
+            .await
+            .unwrap_or_default();
+
+        let mut versions: Vec<String> = images
+            .iter()
+            .flat_map(|img| img.repo_tags.iter())
+            .filter(|tag| tag.starts_with(&prefix))
+            .filter_map(|tag| tag.split(':').last().map(str::to_string))
+            .filter(|v| Version::parse(v).is_ok())
+            .collect();
+        versions.sort_by(|a, b| Version::parse(a).unwrap().cmp(&Version::parse(b).unwrap()));
+        versions.dedup();
+
+        if versions.is_empty() {
+            println!(
+                "    {} No release images found; skipping version tagging.",
+                "•".cyan()
+            );
+            return Ok(V2WorkerFlow::Continue);
+        }
+
+        // Tag every found version to the current saved config snapshot
+        let count = versions.len();
+        for version in &versions {
+            yaml_store::cache_and_tag_config(name, version)?;
+        }
+
+        let version_list = versions.join(", ");
+        println!(
+            "    {} Tagged {} version{} to current config snapshot: {}",
+            "✓".green().bold(),
+            count,
+            if count == 1 { "" } else { "s" },
+            version_list.yellow()
+        );
+
+        ctx.add_warning(
+            "Versions were tagged to the current saved config snapshot. \
+             If config is mismatched to version, please delete that version's image.",
+        );
+        ctx.migrations_applied += 1;
+
+        Ok(V2WorkerFlow::Continue)
+    })
+}
+
+/// Validates the canonical structure of the saves directory for a worker.
+/// Runs after v2_generate_worker_saves so the saves dir is guaranteed to exist.
+fn v2_validate_worker_saves<'a>(
+    ctx: &'a mut PatchV2Ctx,
+    name: &'a str,
+    _worker_path: &'a Path,
+) -> BoxFuture<'a, Result<V2WorkerFlow>> {
+    Box::pin(async move {
+        let saves_dir = yaml_store::get_worker_saves_dir(name)?;
+        let map_path = saves_dir.join("map.json");
+
+        // Parse map.json
+        let map = match VersionConfigMaps::load_from_worker(name) {
+            Ok(m) => m,
+            Err(e) => {
+                let msg = format!("saves/{}/map.json failed to parse: {}", name, e);
+                println!("    {} {}", "✗".red().bold(), msg);
+                ctx.issues.push(msg);
+                return Ok(V2WorkerFlow::Continue);
+            }
+        };
+
+        // Validate worker field
+        if map.worker != name {
+            let msg = format!(
+                "saves/{}/map.json worker field mismatch: expected '{}', got '{}'",
+                name, name, map.worker
+            );
+            println!("    {} {}", "!".yellow().bold(), msg);
+            ctx.issues.push(msg);
+        }
+
+        let mappings = map.mappings.unwrap_or_default();
+
+        // Check every referenced snapshot exists and parses
+        let mut referenced_hashes: HashSet<String> = HashSet::new();
+        let mut saves_valid = true;
+        for (version, hash) in &mappings {
+            referenced_hashes.insert(hash.clone());
+            let snapshot_path = saves_dir.join(format!("{}.json", hash));
+            if !snapshot_path.exists() {
+                let msg = format!(
+                    "saves/{}/{}.json missing (referenced by version {})",
+                    name, hash, version
+                );
+                println!("    {} {}", "✗".red().bold(), msg);
+                ctx.issues.push(msg);
+                saves_valid = false;
+            } else if let Err(e) = RelevantWorkerConfig::load_json(&snapshot_path) {
+                let msg = format!("saves/{}/{}.json failed to parse: {}", name, hash, e);
+                println!("    {} {}", "✗".red().bold(), msg);
+                ctx.issues.push(msg);
+                saves_valid = false;
+            }
+        }
+
+        // Check for unreferenced snapshot files
+        if let Ok(entries) = std::fs::read_dir(&saves_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path == map_path {
+                    continue;
+                }
+                if path.extension().is_some_and(|e| e == "json") {
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !referenced_hashes.contains(&stem) {
+                        let msg = format!(
+                            "saves/{}/{}.json is unreferenced (orphaned snapshot)",
+                            name, stem
+                        );
+                        println!("    {} {}", "!".yellow().bold(), msg);
+                        ctx.issues.push(msg);
+                        saves_valid = false;
+                    }
+                }
+            }
+        }
+
+        if saves_valid && map.worker == name {
+            println!("    {} saves/{}/  valid", "✓".green().bold(), name);
         }
 
         Ok(V2WorkerFlow::Continue)
@@ -1043,4 +1325,194 @@ fn v2_patch_codex_skills(ctx: &mut PatchV2Ctx) -> BoxFuture<'_, Result<()>> {
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn test_skill_directory_hash_deterministic() {
+        let entry = SkillEntry {
+            skill: "test-skill",
+            files: &[
+                ("file1.txt", "content1"),
+                ("file2.txt", "content2"),
+            ],
+        };
+
+        let hash1 = skill_directory_hash(&entry);
+        let hash2 = skill_directory_hash(&entry);
+
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64); // SHA-256 hash length
+    }
+
+    #[test]
+    fn test_skill_directory_hash_different_content() {
+        let entry1 = SkillEntry {
+            skill: "skill1",
+            files: &[("file.txt", "content1")],
+        };
+
+        let entry2 = SkillEntry {
+            skill: "skill2",
+            files: &[("file.txt", "content2")],
+        };
+
+        let hash1 = skill_directory_hash(&entry1);
+        let hash2 = skill_directory_hash(&entry2);
+
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_skill_directory_hash_different_filenames() {
+        let entry1 = SkillEntry {
+            skill: "skill",
+            files: &[("file1.txt", "content")],
+        };
+
+        let entry2 = SkillEntry {
+            skill: "skill",
+            files: &[("file2.txt", "content")],
+        };
+
+        let hash1 = skill_directory_hash(&entry1);
+        let hash2 = skill_directory_hash(&entry2);
+
+        // Hash should differ even if content is same but filename differs
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_skill_directory_hash_empty_files() {
+        let entry = SkillEntry {
+            skill: "empty-skill",
+            files: &[],
+        };
+
+        let hash = skill_directory_hash(&entry);
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_installed_skill_hash_nonexistent() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let nonexistent = temp_dir.path().join("does-not-exist");
+
+        let hash = installed_skill_hash(&nonexistent);
+        assert!(hash.is_none());
+    }
+
+    #[test]
+    fn test_installed_skill_hash_empty_dir() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let empty_dir = temp_dir.path().join("empty");
+        std::fs::create_dir(&empty_dir).unwrap();
+
+        let hash = installed_skill_hash(&empty_dir);
+        assert!(hash.is_some());
+        let hash = hash.unwrap();
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_installed_skill_hash_with_files() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("test-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+
+        std::fs::write(skill_dir.join("file1.txt"), "content1").unwrap();
+        std::fs::write(skill_dir.join("file2.txt"), "content2").unwrap();
+
+        let hash = installed_skill_hash(&skill_dir);
+        assert!(hash.is_some());
+
+        // Hash should be deterministic
+        let hash2 = installed_skill_hash(&skill_dir);
+        assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn test_patch_v2_ctx_new() {
+        let ctx = PatchV2Ctx::new();
+
+        assert_eq!(ctx.issues.len(), 0);
+        assert_eq!(ctx.warnings.len(), 0);
+        assert_eq!(ctx.dockerfiles_updated, 0);
+        assert_eq!(ctx.plugins_updated, 0);
+        assert_eq!(ctx.skills_updated, 0);
+        assert_eq!(ctx.migrations_applied, 0);
+        assert_eq!(ctx.workers_checked, 0);
+        assert!(ctx.settings.is_none());
+        assert!(!ctx.canonical_dockerfile.is_empty());
+        assert!(!ctx.canonical_dockerignore.is_empty());
+    }
+
+    #[test]
+    fn test_patch_v2_ctx_add_warning() {
+        let mut ctx = PatchV2Ctx::new();
+
+        ctx.add_warning("Warning 1");
+        ctx.add_warning("Warning 2");
+        ctx.add_warning("Warning 1"); // Duplicate
+
+        assert_eq!(ctx.warnings.len(), 2); // HashSet deduplicates
+        assert!(ctx.warnings.contains("Warning 1"));
+        assert!(ctx.warnings.contains("Warning 2"));
+    }
+
+    #[test]
+    fn test_patch_v2_ctx_settings_not_loaded() {
+        let ctx = PatchV2Ctx::new();
+
+        let result = ctx.settings();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("settings were not loaded"));
+    }
+
+    #[test]
+    fn test_print_summary_no_issues() {
+        // This test just verifies the function doesn't panic
+        print_summary(5, 2, 1, 0, 0, &[]);
+    }
+
+    #[test]
+    fn test_print_summary_with_issues() {
+        let issues = vec![
+            "Issue 1".to_string(),
+            "Issue 2".to_string(),
+        ];
+        print_summary(10, 3, 2, 1, 0, &issues);
+    }
+
+    #[test]
+    fn test_print_patch_warnings_empty() {
+        let warnings = HashSet::new();
+        print_patch_warnings(&warnings);
+    }
+
+    #[test]
+    fn test_print_patch_warnings_with_items() {
+        let mut warnings = HashSet::new();
+        warnings.insert("Warning 1".to_string());
+        warnings.insert("Warning 2".to_string());
+        print_patch_warnings(&warnings);
+    }
+
+    #[test]
+    fn test_sync_skills_to_agent_creates_manifest() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = temp_dir.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+
+        // This will create the manifest file even if SKILLS is empty
+        let result = sync_skills_to_agent(&agent_dir);
+        assert!(result.is_ok());
+
+        let manifest_path = agent_dir.join(".geoengine-managed-skills");
+        assert!(manifest_path.exists());
+    }
 }
