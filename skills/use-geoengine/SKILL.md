@@ -93,7 +93,7 @@ for usage.
 
 Initialize a new worker directory. Creates `geoengine.yaml` and starter files.
 
-```
+```bash
 geoengine init [OPTIONS]
 ```
 
@@ -113,7 +113,7 @@ Register a new worker or update an existing one. Reads `geoengine.yaml`,
 validates it, installs/updates GIS plugin entries, and regenerates the
 Dockerfile.
 
-```
+```bash
 geoengine apply [WORKER]
 ```
 
@@ -131,7 +131,7 @@ to take effect.
 
 Build the Docker image for a worker.
 
-```
+```bash
 geoengine build [OPTIONS]
 ```
 
@@ -157,7 +157,7 @@ geoengine build [OPTIONS]
 Run a worker with input parameters. Translates `KEY=VALUE` pairs into
 `--key value` CLI flags passed to the script inside Docker.
 
-```
+```bash
 geoengine run [OPTIONS] [WORKER] [-- <ARGS>...]
 ```
 
@@ -177,7 +177,6 @@ geoengine run -i input-file=/data/raster.tif -i output-dir=/output --dev
 # Run a specific previously-built version
 geoengine run my-worker --ver 1.0.0 -i input-file=/data/raster.tif
 ```
-
 > If `--ver` is omitted, `geoengine run` uses the current saved/applied config
 > and its version string to choose the release image tag. It does not look up a
 > separate snapshotted version unless `--ver` is provided.
@@ -194,7 +193,7 @@ geoengine run my-worker --ver 1.0.0 -i input-file=/data/raster.tif
 
 List all registered workers.
 
-```
+```bash
 geoengine workers [OPTIONS]
 ```
 
@@ -214,7 +213,7 @@ For `--json`, each worker entry includes:
 
 Describe a specific worker: shows name, description, version, inputs, and available versions.
 
-```
+```bash
 geoengine describe [WORKER] [--dev] [--ver <VERSION>]
 ```
 
@@ -235,7 +234,7 @@ geoengine describe [WORKER] [--dev] [--ver <VERSION>]
 Check for differences between the current worker files and what GeoEngine has
 on record (useful to see what has changed since the last `apply`).
 
-```
+```bash
 geoengine diff [OPTIONS]
 ```
 
@@ -249,7 +248,7 @@ geoengine diff [OPTIONS]
 
 Delete a worker from GeoEngine (unregisters it; does not delete source files).
 
-```
+```bash
 geoengine delete [OPTIONS]
 ```
 
@@ -263,7 +262,7 @@ geoengine delete [OPTIONS]
 
 Manage Docker images under GeoEngine.
 
-```
+```bash
 geoengine image <SUBCOMMAND>
 ```
 
@@ -279,7 +278,7 @@ geoengine image <SUBCOMMAND>
 
 Deploy images to GCP Artifact Registry.
 
-```
+```bash
 geoengine deploy <SUBCOMMAND>
 ```
 
@@ -298,7 +297,7 @@ Validate all GeoEngine-managed artifacts and repair anything that is stale. Run
 this after upgrading GeoEngine to bring all workers, GIS plugins, and agent
 skills up to date in one shot. (This is done automatically by `geoengine update`.)
 
-```
+```bash
 geoengine patch
 ```
 
@@ -365,7 +364,7 @@ Detects the original install method (Homebrew on macOS, curl install script on
 Linux/macOS/WSL2, PowerShell on Windows) and runs the appropriate updater,
 then automatically calls `geoengine patch`.
 
-```
+```bash
 geoengine update
 ```
 

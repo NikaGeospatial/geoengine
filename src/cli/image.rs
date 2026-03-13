@@ -168,6 +168,26 @@ async fn list_images(client: &DockerClient, filter: Option<&str>, all: bool) -> 
 async fn remove_image(client: &DockerClient, image: &str, force: bool) -> Result<()> {
     println!("{} Removing image {}...", "=>".blue().bold(), image.cyan());
 
+    // Capture release tags before removal so metadata cleanup still works when
+    // Docker no longer reports tags for the deleted image.
+    let tags_to_clean = if image.starts_with("geoengine-local/") {
+        vec![image.to_string()]
+    } else {
+        client
+            .list_images(None, false)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|img| {
+                img.id == image
+                    || short_image_id(&img.id) == image
+                    || img.repo_tags.iter().any(|tag| tag.contains(image))
+            })
+            .flat_map(|img| img.repo_tags.into_iter())
+            .filter(|tag| tag.starts_with("geoengine-local/"))
+            .collect::<Vec<_>>()
+    };
+
     client
         .remove_image(image, force)
         .await
@@ -179,36 +199,16 @@ async fn remove_image(client: &DockerClient, image: &str, force: bool) -> Result
         image.cyan()
     );
 
-    // Clean up the version mapping from saves if this is a geoengine-local release image
-    if let Some(rest) = image.strip_prefix("geoengine-local/") {
-        if let Some((worker_name, version)) = rest.split_once(':') {
-            if let Err(err) = remove_version_from_saves(worker_name, version) {
-                eprintln!(
-                    "  {} Image was removed, but failed to clean saved version metadata for '{}': {}",
-                    "!".yellow().bold(),
-                    worker_name,
-                    err
-                );
-            }
-        }
-    } else {
-        // Image was specified by ID or alias — inspect repo tags to find any
-        // geoengine-local/<worker>:<version> entries and clean those up too.
-        if let Ok(images) = client.list_images(Some(image), false).await {
-            for img in &images {
-                for tag in &img.repo_tags {
-                    if let Some(rest) = tag.strip_prefix("geoengine-local/") {
-                        if let Some((worker_name, version)) = rest.split_once(':') {
-                            if let Err(err) = remove_version_from_saves(worker_name, version) {
-                                eprintln!(
-                                    "  {} Image was removed, but failed to clean saved version metadata for '{}': {}",
-                                    "!".yellow().bold(),
-                                    worker_name,
-                                    err
-                                );
-                            }
-                        }
-                    }
+    for tag in &tags_to_clean {
+        if let Some(rest) = tag.strip_prefix("geoengine-local/") {
+            if let Some((worker_name, version)) = rest.split_once(':') {
+                if let Err(err) = remove_version_from_saves(worker_name, version) {
+                    eprintln!(
+                        "  {} Image was removed, but failed to clean saved version metadata for '{}': {}",
+                        "!".yellow().bold(),
+                        worker_name,
+                        err
+                    );
                 }
             }
         }

@@ -99,6 +99,10 @@ pub fn rename_saves_dir(old_name: &str, new_name: &str) -> Result<()> {
     let new_path = get_worker_saves_dir(new_name)?;
 
     if old_path.exists() {
+        // Keep the map.json update and directory rename in one critical section so
+        // concurrent build/remove operations cannot interleave on the old worker key.
+        let _lock = lock_worker_saves_map(old_name)?;
+
         // Rewrite the worker name within the mapping file first
         let mapping_path = old_path.join("map.json");
 
