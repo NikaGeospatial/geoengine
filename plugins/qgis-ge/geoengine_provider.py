@@ -93,8 +93,21 @@ def load_worker_versions() -> Dict[str, List[str]]:
 
 def save_worker_versions(data: Dict[str, List[str]]) -> None:
     """Persist per-worker version rows to the plugin directory."""
-    with open(WORKER_VERSIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(WORKER_VERSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except (OSError, IOError, json.JSONEncodeError) as e:
+        QgsMessageLog.logMessage(
+            f"Failed to save worker versions to {WORKER_VERSIONS_FILE}: {e}",
+            "GeoEngine",
+            level=1,  # Warning level
+        )
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"Unexpected error saving worker versions to {WORKER_VERSIONS_FILE}: {e}",
+            "GeoEngine",
+            level=2,  # Critical level
+        )
 
 
 class GeoEngineCLIClient:

@@ -150,7 +150,8 @@ pub fn cache_and_tag_config(worker_name: &str, version: &str) -> Result<()> {
 
     // Only write the snapshot file if no file with this hash exists (dedup)
     let snapshot_file = saves_path.join(format!("{}.json", content_hash));
-    if !snapshot_file.exists() {
+    let snapshot_was_new = !snapshot_file.exists();
+    if snapshot_was_new {
         let relevant_fields = current_config.get_relevant_fields();
         let content = serde_json::to_string_pretty(&relevant_fields)
             .context("Failed to serialize relevant fields to JSON")?;
@@ -169,7 +170,20 @@ pub fn cache_and_tag_config(worker_name: &str, version: &str) -> Result<()> {
     let mut mappings = saves_map.mappings.unwrap_or_default();
     mappings.insert(version.to_string(), content_hash);
     saves_map.mappings = Some(mappings);
-    saves_map.save_to_worker(worker_name)?;
+
+    // Save the version map; if this fails and we created a new snapshot, roll it back
+    if let Err(e) = saves_map.save_to_worker(worker_name) {
+        if snapshot_was_new && snapshot_file.exists() {
+            if let Err(remove_err) = std::fs::remove_file(&snapshot_file) {
+                eprintln!(
+                    "Warning: Failed to clean up orphaned snapshot file {} after save error: {}",
+                    snapshot_file.display(),
+                    remove_err
+                );
+            }
+        }
+        return Err(e);
+    }
 
     Ok(())
 }
