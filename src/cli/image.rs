@@ -181,7 +181,7 @@ async fn remove_image(client: &DockerClient, image: &str, force: bool) -> Result
             .filter(|img| {
                 img.id == image
                     || short_image_id(&img.id) == image
-                    || img.repo_tags.iter().any(|tag| tag.contains(image))
+                    || img.repo_tags.iter().any(|tag| tag == image)
             })
             .flat_map(|img| img.repo_tags.into_iter())
             .filter(|tag| tag.starts_with("geoengine-local/"))
@@ -229,9 +229,13 @@ fn remove_version_from_saves(worker_name: &str, version: &str) -> Result<()> {
     // same lock key as cache_and_tag_config to prevent concurrent interleaving.
     let _lock = match yaml_store::lock_worker_saves_map(worker_name) {
         Ok(l) => l,
-        Err(_) => {
-            // If the saves directory doesn't exist yet there is nothing to remove.
-            return Ok(());
+        // If the saves directory doesn't exist yet there is nothing to remove.
+        Err(err) if yaml_store::is_not_found_error(&err) => return Ok(()),
+        Err(err) => {
+            return Err(err).context(format!(
+                "Failed to lock saves map for worker '{}'",
+                worker_name
+            ));
         }
     };
 

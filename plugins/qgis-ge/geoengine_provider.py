@@ -405,8 +405,12 @@ class GeoEngineProvider(QgsProcessingProvider):
                         "GeoEngine",
                         "GeoEngine tool discovery failed. See Log Messages for details.",
                     )
-            except Exception:
-                pass
+            except Exception as ui_err:
+                QgsMessageLog.logMessage(
+                    f"GeoEngine: failed to push discovery warning banner: {ui_err}",
+                    "GeoEngine",
+                    level=1,
+                )
 
         return algorithms
 
