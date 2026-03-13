@@ -100,8 +100,15 @@ pub fn rename_saves_dir(old_name: &str, new_name: &str) -> Result<()> {
         // Rewrite the worker name within the mapping file first
         let mapping_path = old_path.join("map.json");
 
-        let content = std::fs::read_to_string(&mapping_path)
-            .with_context(|| format!("Failed to read map file: {}", mapping_path.display()))?;
+        let content = match std::fs::read_to_string(&mapping_path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("Failed to read map file: {}", mapping_path.display())
+                });
+            }
+        };
 
         let mut config: VersionConfigMaps = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", mapping_path.display()))?;
@@ -209,7 +216,7 @@ pub fn cache_and_tag_config(worker_name: &str, version: &str) -> Result<()> {
     Ok(())
 }
 
-fn is_not_found_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_not_found_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()

@@ -94,7 +94,7 @@ geoengine build --dev
 ### Run a Worker
 
 Each worker defines a command in `geoengine.yaml`. Input parameters are passed as `--input KEY=VALUE` flags, which are forwarded to the container script as `--KEY VALUE` arguments.
-The command is run in the current directory by default. It runs the latest production image if `--dev` is not specified.
+The command is run in the current directory by default. Without `--dev` or `--ver`, GeoEngine loads the current saved/applied config and runs the release image tagged with that config's version.
 
 ```bash
 # Run the worker defined in the current directory using latest production image
@@ -193,6 +193,8 @@ geoengine delete --name my-worker
 geoengine delete
 ```
 
+Omit `<worker>` to describe the worker in the current directory. `--ver` cannot be combined with `--dev`.
+
 `geoengine workers --json` entries include:
 - `name`, `path`, `has_tool`, `found`, `description`
 - `has_dev_image` — whether `geoengine-local-dev/<worker>:latest` exists locally
@@ -208,7 +210,10 @@ geoengine patch
 
 It checks and repairs the following:
 - Global artifacts
-  - Worker state image flags — before state validation, patches `state/*.yaml` to reflect local Docker image presence via `has_dev_image` and `has_pushed_image`
+  - `~/.geoengine/settings.yaml` — validates the global registry/settings file
+- Saved worker records
+  - Worker state files — validates `state/*.yaml`, reports orphaned files, and patches `has_dev_image` / `has_pushed_image` from local Docker image presence
+  - Saved config files — validates `configs/*.json` and reports orphaned files
 - Worker artifacts
   - Worker path — warns if the registered path no longer exists on disk
   - `geoengine.yaml` — validates schema (read-only, never modified)
@@ -297,7 +302,7 @@ Each successful production build (`geoengine build`, without `--dev`) snapshots 
 geoengine run my-worker --ver 1.0.0 --input input-file=/data/raster.tif
 ```
 
-If `--ver` is omitted, `geoengine run` uses the latest applied configuration. Running `geoengine patch` will initialize saves/version mappings only for workers whose `~/.geoengine/saves/{worker}/map.json` is missing, and then tag any previously-built Docker image versions once to the current saved config snapshot.
+If `--ver` is omitted, `geoengine run` uses the current saved/applied config and its version string to choose the release image tag. It does not resolve a separate snapshotted version unless you pass `--ver`. Running `geoengine patch` will initialize saves/version mappings only for workers whose `~/.geoengine/saves/{worker}/map.json` is missing, and then tag any previously-built Docker image versions once to the current saved config snapshot.
 
 
 ## Worker Configuration
@@ -447,7 +452,7 @@ CUDA is not available on macOS. PyTorch will automatically use the MPS (Metal) b
 | `geoengine diff [--file all\|config\|dockerfile\|worker]`      | Check which tracked files have changed since last apply                                     |
 | `geoengine delete [--name <worker>]`                           | Delete a worker, clean up state and saved configuration                                     |
 | `geoengine workers [--json] [--gis arcgis\|qgis]`              | List registered workers                                                                     |
-| `geoengine describe [<worker>] [--json] [--dev] [--ver VERSION]` | Displays information from the latest built config by default, or the dev config with `--dev` |
+| `geoengine describe [<worker>] [--json] [--dev] [--ver VERSION]` | Displays information from the latest built config by default, or the dev config with `--dev`; defaults to the current directory when `<worker>` is omitted |
 | `geoengine patch`                                              | Validate all artifacts, regenerate stale Dockerfiles, reinstall stale GIS plugins, and sync agent skills |
 | `geoengine update`                                             | Update GeoEngine to the latest version via the original install method, then automatically run `geoengine patch` |
 | `geoengine image list\|import\|remove`                         | Manage Docker images                                                                        |

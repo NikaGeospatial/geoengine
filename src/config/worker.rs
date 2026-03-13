@@ -148,14 +148,13 @@ impl WorkerConfig {
         state::sha256_string(&content_fields.to_string())
     }
 
-    /// Compute a SHA-256 hash of the version-relevant fields:
-    /// name, version, description, command, and local_dir_mounts.
-    /// Excludes plugins and deploy which don't affect the Docker image.
+    /// Compute a SHA-256 hash of the build-relevant fields:
+    /// name, version, command, and local_dir_mounts.
+    /// Excludes description, plugins, and deploy which don't affect the Docker image.
     pub fn build_relevant_hash(&self) -> String {
         let build_fields = serde_json::json!({
             "name": self.name,
             "version": self.version,
-            "description": self.description,
             "command": self.command.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default()),
             "local_dir_mounts": self.local_dir_mounts.as_ref().map(|m| serde_json::to_value(m).unwrap_or_default())
         });
@@ -291,5 +290,61 @@ impl VersionConfigMaps {
         std::fs::write(path, content).context("Failed to write mappings file")?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config(description: Option<&str>) -> WorkerConfig {
+        WorkerConfig {
+            name: "example-worker".to_string(),
+            version: "1.2.3".to_string(),
+            description: description.map(str::to_string),
+            command: Some(CommandConfig {
+                program: "python".to_string(),
+                script: "main.py".to_string(),
+                inputs: Some(vec![InputParameter {
+                    name: "input".to_string(),
+                    param_type: "file".to_string(),
+                    required: Some(true),
+                    default: None,
+                    description: Some("Input raster".to_string()),
+                    enum_values: None,
+                    readonly: Some(true),
+                    filetypes: Some(vec![".tif".to_string()]),
+                }]),
+            }),
+            local_dir_mounts: Some(vec![MountConfig {
+                host_path: "./data".to_string(),
+                container_path: "/data".to_string(),
+                readonly: Some(true),
+            }]),
+            plugins: None,
+            deploy: None,
+        }
+    }
+
+    #[test]
+    fn build_relevant_hash_ignores_description_changes() {
+        let with_description = sample_config(Some("First description"));
+        let updated_description = sample_config(Some("Updated description"));
+
+        assert_eq!(
+            with_description.build_relevant_hash(),
+            updated_description.build_relevant_hash()
+        );
+    }
+
+    #[test]
+    fn config_content_hash_tracks_description_changes() {
+        let with_description = sample_config(Some("First description"));
+        let updated_description = sample_config(Some("Updated description"));
+
+        assert_ne!(
+            with_description.config_content_hash(),
+            updated_description.config_content_hash()
+        );
     }
 }

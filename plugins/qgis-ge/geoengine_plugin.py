@@ -14,11 +14,8 @@ from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from .geoengine_provider import (
     GeoEngineProvider,
     GeoEngineCLIClient,
-    WorkerVersionsDialog,
     is_dev_mode_enabled,
     set_dev_mode_enabled,
-    load_worker_versions,
-    save_worker_versions,
     _PLUGIN_TMP_DIR,
 )
 
@@ -122,12 +119,6 @@ class GeoEnginePlugin:
         self.iface.addPluginToMenu(self.menu, dev_mode_action)
         self.actions.append(dev_mode_action)
 
-        self._version_action = QAction('Set Worker Versions...', self.iface.mainWindow())
-        self._version_action.triggered.connect(self.show_version_dialog)
-        self._version_action.setVisible(not is_dev_mode_enabled())
-        self.iface.addPluginToMenu(self.menu, self._version_action)
-        self.actions.append(self._version_action)
-
         # Add menu action to check service status
         self.add_action(
             'geoengine_status',
@@ -218,7 +209,6 @@ class GeoEnginePlugin:
     def toggle_dev_mode(self, enabled):
         """Toggle worker execution mode between release and dev images."""
         set_dev_mode_enabled(bool(enabled))
-        self._version_action.setVisible(not bool(enabled))
         mode = "enabled" if enabled else "disabled"
         self.iface.messageBar().pushInfo("GeoEngine", f"Dev mode {mode}")
         try:
@@ -228,39 +218,6 @@ class GeoEnginePlugin:
                 self.iface.mainWindow(),
                 "GeoEngine Error",
                 f"Error refreshing processing providers:\n{e}"
-            )
-
-    def show_version_dialog(self):
-        """Open the Set Worker Versions dialog (only available when dev mode is off)."""
-        try:
-            client = GeoEngineCLIClient()
-            workers = client.list_workers()
-            eligible = [w for w in workers if w.get('has_tool') and w.get('has_pushed_image')]
-
-            worker_versions_info = {}
-            for w in eligible:
-                tool = client.get_worker_tool(w['name'])
-                avail = list(tool.get('available_versions') or []) if tool else []
-                worker_versions_info[w['name']] = ['latest'] + avail
-
-            current = load_worker_versions()
-            dlg = WorkerVersionsDialog(worker_versions_info, current, self.iface.mainWindow())
-            if dlg.exec_():
-                save_worker_versions(dlg.get_result())
-                self._do_silent_refresh()
-
-        except FileNotFoundError as e:
-            QMessageBox.warning(
-                self.iface.mainWindow(),
-                "GeoEngine Error",
-                f"{e}\n\nInstall geoengine and ensure it is on your PATH:\n"
-                "  https://github.com/NikaGeospatial/geoengine",
-            )
-        except Exception as e:
-            QMessageBox.warning(
-                self.iface.mainWindow(),
-                "GeoEngine Error",
-                f"Error opening version dialog:\n{e}",
             )
 
     def _register_custom_widgets(self):

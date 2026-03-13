@@ -5,7 +5,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
 use crate::config::worker::VersionConfigMaps;
-use crate::config::yaml_store::get_worker_saves_dir;
+use crate::config::yaml_store::{self, get_worker_saves_dir};
 use crate::docker::client::DockerClient;
 
 #[derive(Subcommand)]
@@ -182,38 +182,58 @@ async fn remove_image(client: &DockerClient, image: &str, force: bool) -> Result
     // Clean up the version mapping from saves if this is a geoengine-local release image
     if let Some(rest) = image.strip_prefix("geoengine-local/") {
         if let Some((worker_name, version)) = rest.split_once(':') {
-            remove_version_from_saves(worker_name, version);
+            if let Err(err) = remove_version_from_saves(worker_name, version) {
+                eprintln!(
+                    "  {} Image was removed, but failed to clean saved version metadata for '{}': {}",
+                    "!".yellow().bold(),
+                    worker_name,
+                    err
+                );
+            }
         }
     }
 
     Ok(())
 }
 
-fn remove_version_from_saves(worker_name: &str, version: &str) {
-    let saves_dir = match get_worker_saves_dir(worker_name) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
+fn remove_version_from_saves(worker_name: &str, version: &str) -> Result<()> {
+    let saves_dir = get_worker_saves_dir(worker_name).with_context(|| {
+        format!(
+            "Failed to resolve saves directory for worker '{}'",
+            worker_name
+        )
+    })?;
 
     let mut map = match VersionConfigMaps::load_from_worker(worker_name) {
         Ok(m) => m,
-        Err(_) => return, // no saves for this worker; nothing to clean
+        Err(err) if yaml_store::is_not_found_error(&err) => return Ok(()),
+        Err(err) => {
+            return Err(err).context(format!(
+                "Failed to load saved version metadata for worker '{}'",
+                worker_name
+            ));
+        }
     };
 
     let mut mappings = map.mappings.unwrap_or_default();
 
     // Get the hash before removing so we can check if it's still referenced
-    let removed_hash = mappings.remove(version);
+    let removed_hash = match mappings.remove(version) {
+        Some(hash) => hash,
+        None => return Ok(()),
+    };
     map.mappings = if mappings.is_empty() {
         None
     } else {
         Some(mappings.clone())
     };
 
-    if let Err(e) = map.save_to_worker(worker_name) {
-        eprintln!("{} Failed to update saves map: {}", "!".yellow().bold(), e);
-        return;
-    }
+    map.save_to_worker(worker_name).with_context(|| {
+        format!(
+            "Failed to update saved version metadata for worker '{}'",
+            worker_name
+        )
+    })?;
 
     println!(
         "  {} Removed version '{}' from saves map for worker '{}'",
@@ -223,28 +243,28 @@ fn remove_version_from_saves(worker_name: &str, version: &str) {
     );
 
     // If the removed hash is no longer referenced by any other version, delete the snapshot
-    if let Some(hash) = removed_hash {
-        let still_referenced = mappings.values().any(|h| h == &hash);
-        if !still_referenced {
-            let snapshot = saves_dir.join(format!("{}.json", hash));
-            if snapshot.exists() {
-                if let Err(e) = std::fs::remove_file(&snapshot) {
-                    eprintln!(
-                        "  {} Failed to delete snapshot file: {}",
-                        "!".yellow().bold(),
-                        e
-                    );
-                } else {
-                    let short_hash = &hash[..12.min(hash.len())];
-                    println!(
-                        "  {} Deleted unreferenced config snapshot ({})",
-                        "✓".green().bold(),
-                        short_hash
-                    );
-                }
+    let still_referenced = mappings.values().any(|h| h == &removed_hash);
+    if !still_referenced {
+        let snapshot = saves_dir.join(format!("{}.json", removed_hash));
+        if snapshot.exists() {
+            if let Err(e) = std::fs::remove_file(&snapshot) {
+                eprintln!(
+                    "  {} Failed to delete snapshot file: {}",
+                    "!".yellow().bold(),
+                    e
+                );
+            } else {
+                let short_hash = &removed_hash[..12.min(removed_hash.len())];
+                println!(
+                    "  {} Deleted unreferenced config snapshot ({})",
+                    "✓".green().bold(),
+                    short_hash
+                );
             }
         }
     }
+
+    Ok(())
 }
 
 fn format_size(bytes: i64) -> String {

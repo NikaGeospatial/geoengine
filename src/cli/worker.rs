@@ -596,15 +596,7 @@ pub async fn build_worker(
             verbose,
             progress_step_tx,
         )
-        .await
-        .and_then(|_| {
-            if !dev {
-                yaml_store::cache_and_tag_config(worker, new_version.as_ref())
-                    .context(format!("Failed to cache config for {}", worker))
-            } else {
-                Ok(())
-            }
-        });
+        .await;
 
     if let Some(step_task) = step_task {
         let _ = step_task.await;
@@ -618,6 +610,14 @@ pub async fn build_worker(
     }
 
     build_result?;
+    if !dev {
+        yaml_store::cache_and_tag_config(worker, new_version.as_ref()).with_context(|| {
+            format!(
+                "Docker image '{}' built successfully, but failed to create the saved config snapshot for worker '{}'",
+                build_image_tag, worker
+            )
+        })?;
+    }
     println!(
         "{} Successfully built image: {}",
         "✓".green().bold(),
@@ -1619,9 +1619,17 @@ pub async fn describe_worker(
         .and_then(|s| s.command_hash.as_ref().map(|h| short_hash(h)));
 
     // Load available versions from map.json (no Docker needed)
-    let available_versions = load_available_versions(&worker_name)
-        .ok()
-        .filter(|versions| !versions.is_empty());
+    let available_versions = match load_available_versions(&worker_name) {
+        Ok(versions) if !versions.is_empty() => Some(versions),
+        Ok(_) => None,
+        Err(err) if yaml_store::is_not_found_error(&err) => None,
+        Err(err) => {
+            return Err(err).context(format!(
+                "Failed to load available versions for worker '{}'",
+                worker_name
+            ));
+        }
+    };
 
     let desc = WorkerDescription {
         name: config.name.clone(),
@@ -1982,14 +1990,14 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
 
     for (name, path) in workers {
         let applied = if yaml_store::load_saved_config(name).is_ok() {
-            "✓".green()
+            format!("{:<found_w$}", "✓", found_w = found_w).green()
         } else {
-            "✗".red()
+            format!("{:<found_w$}", "✗", found_w = found_w).red()
         };
         let found = if path.join("geoengine.yaml").exists() {
-            "✓".green()
+            format!("{:<found_w$}", "✓", found_w = found_w).green()
         } else {
-            "✗".red()
+            format!("{:<found_w$}", "✗", found_w = found_w).red()
         };
         let worker_state = state::load_state(name).ok().flatten();
         let has_dev = if worker_state
@@ -1997,30 +2005,28 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
             .map(|s| s.has_dev_image)
             .unwrap_or(false)
         {
-            "yes".green()
+            format!("{:<dev_w$}", "yes", dev_w = dev_w).green()
         } else {
-            "no".red()
+            format!("{:<dev_w$}", "no", dev_w = dev_w).red()
         };
         let has_pushed = if worker_state
             .as_ref()
             .map(|s| s.has_pushed_image)
             .unwrap_or(false)
         {
-            "yes".green()
+            format!("{:<pushed_w$}", "yes", pushed_w = pushed_w).green()
         } else {
-            "no".red()
+            format!("{:<pushed_w$}", "no", pushed_w = pushed_w).red()
         };
         println!(
-            "{} {:<name_w$} {:<5} {:<dev_w$} {:<pushed_w$}   {}",
+            "{} {:<name_w$} {} {} {}   {}",
             applied,
             name,
             found,
             has_dev,
             has_pushed,
             path.display(),
-            name_w = name_w - 2,
-            dev_w = dev_w,
-            pushed_w = pushed_w
+            name_w = name_w - 2
         );
     }
     println!();
@@ -2203,12 +2209,21 @@ fn short_hash(h: &str) -> String {
 }
 
 fn load_worker_version_mappings(worker_name: &str) -> Result<HashMap<String, String>> {
-    let map = VersionConfigMaps::load_from_worker(worker_name).with_context(|| {
-        format!(
-            "No version snapshots found for worker '{}'. Run 'geoengine build' to create versioned builds.",
-            worker_name
-        )
-    })?;
+    let map = match VersionConfigMaps::load_from_worker(worker_name) {
+        Ok(map) => map,
+        Err(err) if yaml_store::is_not_found_error(&err) => {
+            anyhow::bail!(
+                "No version snapshots found for worker '{}'. Run 'geoengine build' to create versioned builds.",
+                worker_name
+            );
+        }
+        Err(err) => {
+            return Err(err).context(format!(
+                "Failed to load version snapshots for worker '{}'",
+                worker_name
+            ));
+        }
+    };
 
     Ok(map.mappings.unwrap_or_default())
 }

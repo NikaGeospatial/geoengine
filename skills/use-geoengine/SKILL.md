@@ -178,7 +178,9 @@ geoengine run -i input-file=/data/raster.tif -i output-dir=/output --dev
 geoengine run my-worker --ver 1.0.0 -i input-file=/data/raster.tif
 ```
 
-> If `--ver` is omitted, the latest applied config version is used.
+> If `--ver` is omitted, `geoengine run` uses the current saved/applied config
+> and its version string to choose the release image tag. It does not look up a
+> separate snapshotted version unless `--ver` is provided.
 
 > If a `file` parameter in `geoengine.yaml` declares `filetypes`, `geoengine run`
 > validates the file extension early and bails with a clear error if it does not
@@ -221,7 +223,7 @@ geoengine describe [WORKER] [--dev] [--ver <VERSION>]
 | `[WORKER]` | Worker name or path. Defaults to current directory. |
 | `--json` | Output as JSON. |
 | `--dev` | Describe the currently applied development config. |
-| `--ver <VERSION>` | Describe a specific previously-built version. Ignored when `--dev` is set. |
+| `--ver <VERSION>` | Describe a specific previously-built version. Cannot be combined with `--dev`. |
 
 > The human-readable output includes an **AVAILABLE VERSIONS** line listing all versions
 > recorded in `~/.geoengine/saves/{worker}/map.json` (no Docker client required). The JSON
@@ -303,17 +305,18 @@ geoengine patch
 
 No flags. The command:
 
-1. **Global artifacts** — parses `~/.geoengine/settings.yaml`, every
-   `state/*.yaml`, and every `configs/*.json`; reports parse errors and
-   orphaned files (files with no matching registered worker). During state
-   checks, it also patches `has_dev_image` and `has_pushed_image` in each
-   worker state from local Docker image presence.
-2. **Per-worker** — for every registered worker: checks the path exists,
+1. **Global artifacts** — parses `~/.geoengine/settings.yaml` and reports
+   settings parse failures before any dependent checks run.
+2. **Saved worker records** — validates every `state/*.yaml` and
+   `configs/*.json`, reports parse errors and orphaned files (files with no
+   matching registered worker), and patches `has_dev_image` /
+   `has_pushed_image` in each worker state from local Docker image presence.
+3. **Per-worker** — for every registered worker: checks the path exists,
    validates `geoengine.yaml` schema (read-only), checks `pixi.toml` is
    present (read-only), and silently regenerates `Dockerfile` and
    `.dockerignore` if their content differs from the current canonical
    template.
-3. **Saves migration** — for every registered worker: if
+4. **Saves migration** — for every registered worker: if
    `~/.geoengine/saves/{worker}/map.json` is missing, initializes the
    versioning saves directory and tags any previously-built release Docker
    image versions to the current saved config snapshot (enabling
@@ -321,11 +324,11 @@ No flags. The command:
    exists, this migration step is skipped for that worker. Then validates the
    canonical structure of the saves directory (checks map.json parses, all
    referenced snapshots exist, no orphaned snapshot files).
-4. **GIS plugins** — hashes each installed QGIS and ArcGIS plugin file
+5. **GIS plugins** — hashes each installed QGIS and ArcGIS plugin file
    against the canonical version embedded in the binary. Reinstalls
    automatically if stale; skips entirely if the GIS application is not
    installed on the machine.
-5. **Agent skills** — syncs the GeoEngine skills from the local `skills/`
+6. **Agent skills** — syncs the GeoEngine skills from the local `skills/`
    directory into each installed agent's skills folder (`~/.claude/skills` for
    Claude, `~/.codex/skills` for Codex). Skills are compared by SHA-256 hash:
    changed or missing skills are updated, identical ones skipped. Agents not

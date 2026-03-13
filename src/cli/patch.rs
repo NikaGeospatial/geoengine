@@ -1,6 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
 use semver::Version;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -92,7 +93,7 @@ fn print_patch_warnings(warnings: &HashSet<String>) {
 }
 
 use crate::docker::client::DockerClient;
-use crate::utils::versioning::get_latest_worker_version;
+use crate::utils::versioning::{compare_versions, get_latest_worker_version};
 use anyhow::anyhow;
 use futures::future::BoxFuture;
 use std::path::Path;
@@ -781,7 +782,7 @@ fn v2_patch_worker_docker_artifacts<'a>(
     })
 }
 
-/// # Migration from v0.4.5.
+/// # Migration from v0.4.6.
 /// Ensures the saves directory and map.json exist for a worker, then tags all
 /// found release Docker image versions to the current saved config snapshot.
 fn v2_generate_worker_saves<'a>(
@@ -823,10 +824,21 @@ fn v2_generate_worker_saves<'a>(
 
         // Collect all valid semver release versions from local Docker images
         let prefix = format!("geoengine-local/{}:", name);
-        let images = docker
+        let images = match docker
             .list_images(Some(&format!("geoengine-local/{}", name)), true)
             .await
-            .unwrap_or_default();
+        {
+            Ok(images) => images,
+            Err(e) => {
+                println!(
+                    "    {} Failed to list Docker images; skipping version tagging for '{}': {}",
+                    "!".yellow().bold(),
+                    name,
+                    e
+                );
+                return Ok(V2WorkerFlow::Continue);
+            }
+        };
 
         let mut versions: Vec<String> = images
             .iter()
@@ -835,7 +847,11 @@ fn v2_generate_worker_saves<'a>(
             .filter_map(|tag| tag.split(':').last().map(str::to_string))
             .filter(|v| Version::parse(v).is_ok())
             .collect();
-        versions.sort_by(|a, b| Version::parse(a).unwrap().cmp(&Version::parse(b).unwrap()));
+        versions.sort_by(|a, b| {
+            compare_versions(a, b)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.cmp(b))
+        });
         versions.dedup();
 
         if versions.is_empty() {
