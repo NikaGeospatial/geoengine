@@ -64,11 +64,18 @@ class GeoEnginePlugin:
 
     def _on_trigger_changed(self, path):
         """Called when the trigger file is modified by geoengine apply."""
-        self._do_silent_refresh()
-        # Re-watch: some OS's drop the watch after a write
-        if path not in self._watcher.files():
-            if os.path.exists(path):
-                self._watcher.addPath(path)
+        try:
+            self._do_silent_refresh()
+            # Re-watch: some OS's drop the watch after a write
+            if path not in self._watcher.files():
+                if os.path.exists(path):
+                    self._watcher.addPath(path)
+        except Exception as e:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "GeoEngine Error",
+                f"Error refreshing processing providers:\n{e}"
+            )
 
     def _refresh_processing_toolbox_providers(self):
         """Refresh QGIS built-in Processing providers used by the toolbox."""
@@ -105,6 +112,13 @@ class GeoEnginePlugin:
         # Start watching for external refresh triggers
         self._setup_file_watcher()
 
+        dev_mode_action = QAction('Developer Mode (use dev worker images)', self.iface.mainWindow())
+        dev_mode_action.setCheckable(True)
+        dev_mode_action.setChecked(is_dev_mode_enabled())
+        dev_mode_action.triggered.connect(self.toggle_dev_mode)
+        self.iface.addPluginToMenu(self.menu, dev_mode_action)
+        self.actions.append(dev_mode_action)
+
         # Add menu action to check service status
         self.add_action(
             'geoengine_status',
@@ -112,13 +126,6 @@ class GeoEnginePlugin:
             self.show_status,
             menu=self.menu,
         )
-
-        dev_mode_action = QAction('Developer Mode (use dev worker images)', self.iface.mainWindow())
-        dev_mode_action.setCheckable(True)
-        dev_mode_action.setChecked(is_dev_mode_enabled())
-        dev_mode_action.triggered.connect(self.toggle_dev_mode)
-        self.iface.addPluginToMenu(self.menu, dev_mode_action)
-        self.actions.append(dev_mode_action)
 
     def add_action(
         self,
@@ -204,6 +211,14 @@ class GeoEnginePlugin:
         set_dev_mode_enabled(bool(enabled))
         mode = "enabled" if enabled else "disabled"
         self.iface.messageBar().pushInfo("GeoEngine", f"Dev mode {mode}")
+        try:
+            self._do_silent_refresh()
+        except Exception as e:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "GeoEngine Error",
+                f"Error refreshing processing providers:\n{e}"
+            )
 
     def _register_custom_widgets(self):
         """Register custom widgets from geoengine_widgets.py. Add custom widgets here for registration."""

@@ -7,6 +7,7 @@ as QGIS Processing algorithms.
 
 import json
 import os
+import qgis.utils
 import shutil
 import subprocess
 import tempfile
@@ -70,6 +71,8 @@ def set_dev_mode_enabled(enabled: bool) -> None:
     s = QgsSettings()
     s.setValue(DEV_MODE_SETTING_KEY, enabled)
     s.sync()
+
+
 
 
 class GeoEngineCLIClient:
@@ -196,10 +199,15 @@ class GeoEngineCLIClient:
             raise Exception(f"Failed to list workers: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
-    def get_worker_tool(self, name: str) -> Optional[Dict]:
+    def get_worker_tool(self, name: str, ver: Optional[str] = None) -> Optional[Dict]:
         """Get the tool/input description for a worker via `geoengine run <name> --describe`."""
+        describe_args = [self.binary, 'describe', name, '--json']
+        if is_dev_mode_enabled():
+            describe_args.append('--dev')
+        elif ver:
+            describe_args.extend(['--ver', ver])
         result = subprocess.run(
-            [self.binary, 'describe', name, '--json'],
+            describe_args,
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
@@ -213,6 +221,7 @@ class GeoEngineCLIClient:
         on_output: Optional[Callable[[str], None]] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
         dev_mode: Optional[bool] = None,
+        ver: Optional[str] = None,
     ) -> Dict:
         """Run a worker synchronously, streaming container output via on_output.
 
@@ -224,6 +233,8 @@ class GeoEngineCLIClient:
             dev_mode = is_dev_mode_enabled()
         if dev_mode:
             cmd.append('--dev')
+        elif ver:
+            cmd.extend(['--ver', ver])
 
         for key, value in inputs.items():
             if value is not None:
@@ -353,13 +364,54 @@ class GeoEngineProvider(QgsProcessingProvider):
             for worker in workers:
                 if not worker.get('has_tool', False):
                     continue
-                tool = client.get_worker_tool(worker['name'])
-                if tool:
-                    alg = GeoEngineAlgorithm(worker['name'], tool)
-                    algorithms.append(alg)
+
+                if is_dev_mode_enabled():
+                    # Dev mode: single algorithm per worker, no version grouping
+                    if not worker.get('has_dev_image'):
+                        continue
+                    tool = client.get_worker_tool(worker['name'])
+                    if tool:
+                        algorithms.append(GeoEngineAlgorithm(worker['name'], tool, ver=None))
+                else:
+                    # Release mode: one algorithm per available version, grouped by worker
+                    if not worker.get('has_pushed_image'):
+                        continue
+                    tool = client.get_worker_tool(worker['name'])
+                    if not tool:
+                        continue
+
+                    available_versions = tool.get('available_versions') or []
+
+                    if not available_versions:
+                        # Fallback: worker has a pushed image but no version metadata yet;
+                        # surface it as a single unversioned entry so it appears in the toolbox.
+                        versioned_tool = client.get_worker_tool(worker['name']) or tool
+                        algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=None))
+                    else:
+                        latest_ver = available_versions[-1]
+                        for ver in available_versions:
+                            versioned_tool = client.get_worker_tool(worker['name'], ver=ver) or tool
+                            algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=ver, is_latest=(ver == latest_ver)))
 
         except Exception as e:
-            print(f"GeoEngine tool discovery failed: {e}")
+            QgsMessageLog.logMessage(
+                f"GeoEngine tool discovery failed: {e}",
+                "GeoEngine",
+                level=1,
+            )
+            try:
+                iface = getattr(qgis.utils, "iface", None)
+                if iface is not None:
+                    iface.messageBar().pushWarning(
+                        "GeoEngine",
+                        "GeoEngine tool discovery failed. See Log Messages for details.",
+                    )
+            except Exception as ui_err:
+                QgsMessageLog.logMessage(
+                    f"GeoEngine: failed to push discovery warning banner: {ui_err}",
+                    "GeoEngine",
+                    level=1,
+                )
 
         return algorithms
 
@@ -373,32 +425,52 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
     """Dynamic QGIS Processing algorithm for a GeoEngine worker."""
     OPEN_OUTPUT_FOLDER_PARAM = "__geoengine_open_output_folder"
 
-    def __init__(self, worker_name: str, tool_info: Dict):
+    def __init__(self, worker_name: str, tool_info: Dict, ver: Optional[str] = None, dev_mode: Optional[bool] = None, is_latest: bool = False):
         """Initialize an algorithm wrapper for a worker definition."""
         super().__init__()
         self._worker = worker_name
         self._tool = tool_info
         self._inputs = tool_info.get('inputs', [])
+        self._ver = ver  # None means "latest" (no --ver flag)
+        self._is_latest = is_latest
+        # Freeze dev mode and group membership at construction time so createInstance()
+        # clones always return the same values — QGIS requires these to be stable.
+        self._dev_mode = is_dev_mode_enabled() if dev_mode is None else dev_mode
+        self._group = '' if self._dev_mode else tool_info.get('name', worker_name)
+        self._group_id = '' if self._dev_mode else worker_name
 
     def createInstance(self):
         """Create a new algorithm instance for QGIS cloning."""
-        return GeoEngineAlgorithm(self._worker, self._tool)
+        return GeoEngineAlgorithm(self._worker, self._tool, self._ver, dev_mode=self._dev_mode, is_latest=self._is_latest)
 
     def name(self) -> str:
-        """Return the algorithm id used by QGIS processing."""
+        """Return the algorithm id used by QGIS processing (must be unique per algorithm)."""
+        if self._ver:
+            safe = self._ver.replace('.', '_').replace('-', '_')
+            return f"{self._worker}__ver__{safe}"
         return self._worker
 
     def displayName(self) -> str:
         """Return the human-readable algorithm name."""
-        return self._tool.get('name', self._worker)
+        base = self._tool.get('name', self._worker)
+        if self._ver:
+            label = f"{base} (*{self._ver})" if self._is_latest else f"{base} ({self._ver})"
+            return label
+        return base
 
     def group(self) -> str:
-        """Return the group label for this algorithm."""
-        return ''
+        """Return the group label for this algorithm.
+
+        In release mode all versions of a worker share the worker's display
+        name as their group, which makes QGIS render them under a collapsible
+        labelled with the worker name in the Processing Toolbox.
+        In dev mode there is only one algorithm per worker so no group is used.
+        """
+        return self._group
 
     def groupId(self) -> str:
-        """Return the group identifier for this algorithm."""
-        return ''
+        """Return the stable group identifier for this algorithm."""
+        return self._group_id
 
     def shortHelpString(self) -> str:
         """Return help text sourced from the worker description, with apply/build metadata."""
@@ -408,29 +480,34 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         if description:
             parts.append(description)
 
-        applied_at = self._tool.get('applied_at')
-        built_at = self._tool.get('built_at')
-        yaml_hash = self._tool.get('yaml_hash')
-        script_hash = self._tool.get('script_hash')
+        if self._dev_mode:
+            applied_at = self._tool.get('applied_at')
+            built_at = self._tool.get('built_at')
+            yaml_hash = self._tool.get('yaml_hash')
+            script_hash = self._tool.get('script_hash')
 
-        parts.append("\n--------------\n")
-        apply_block = []
-        if yaml_hash:
-            apply_block.append(f"Saved YAML hash: {yaml_hash}...")
-        if applied_at:
-            apply_block.append(f"Last applied {self._format_age(applied_at)}")
-        if apply_block:
-            parts.append("\n".join(apply_block))
-            parts.append("--------------\n")
+            parts.append("\n--------------\n")
+            apply_block = []
+            if yaml_hash:
+                apply_block.append(f"Saved YAML hash: {yaml_hash}...")
+            if applied_at:
+                apply_block.append(f"Last applied {self._format_age(applied_at)}")
+            if apply_block:
+                parts.append("\n".join(apply_block))
+                parts.append("--------------\n")
 
-        build_block = []
-        if script_hash:
-            build_block.append(f"Built script hash: {script_hash}...")
-        if built_at:
-            build_block.append(f"Last built {self._format_age(built_at)}")
-        if build_block:
-            parts.append("\n".join(build_block))
-            parts.append("--------------\n")
+            build_block = []
+            if script_hash:
+                build_block.append(f"Built script hash: {script_hash}...")
+            if built_at:
+                build_block.append(f"Last built {self._format_age(built_at)}")
+            if build_block:
+                parts.append("\n".join(build_block))
+                parts.append("--------------\n")
+
+        else:
+            ver_display = self._ver or self._tool.get('version') or 'latest'
+            parts.append(f"Version: {ver_display}")
 
         return "\n\n".join(parts)
 
@@ -771,7 +848,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         input_name: str,
         context: QgsProcessingContext,
         feedback: QgsProcessingFeedback,
-    ) -> (str, str):
+    ) -> Tuple[str, str]:
         """Export a raster layer to a temporary GeoTIFF and return (path, temp_dir)."""
         temp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-input-", dir=_PLUGIN_TMP_DIR)
         out_path = os.path.join(temp_dir, f"{self._safe_temp_stem(input_name)}.tif")
@@ -1154,6 +1231,8 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 inputs=inputs,
                 on_output=lambda line: feedback.pushInfo(line),
                 is_cancelled=lambda: feedback.isCanceled(),
+                ver=self._ver,
+                dev_mode=self._dev_mode,
             )
 
             feedback.pushInfo("Worker completed successfully!")
@@ -1196,3 +1275,4 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         finally:
             for temp_dir in temp_export_dirs:
                 shutil.rmtree(temp_dir, ignore_errors=True)
+

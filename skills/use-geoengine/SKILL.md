@@ -93,7 +93,7 @@ for usage.
 
 Initialize a new worker directory. Creates `geoengine.yaml` and starter files.
 
-```
+```bash
 geoengine init [OPTIONS]
 ```
 
@@ -113,7 +113,7 @@ Register a new worker or update an existing one. Reads `geoengine.yaml`,
 validates it, installs/updates GIS plugin entries, and regenerates the
 Dockerfile.
 
-```
+```bash
 geoengine apply [WORKER]
 ```
 
@@ -131,7 +131,7 @@ to take effect.
 
 Build the Docker image for a worker.
 
-```
+```bash
 geoengine build [OPTIONS]
 ```
 
@@ -146,6 +146,10 @@ geoengine build [OPTIONS]
   `geoengine apply`.
 - `geoengine build` — production build once the worker is stable.
 
+> After each successful production build (non-dev), GeoEngine snapshots the current
+> worker config to `~/.geoengine/saves/{worker}/` and maps the version to that snapshot.
+> This enables `geoengine run --ver <VERSION>` to reproduce that exact configuration.
+
 ---
 
 ### `geoengine run`
@@ -153,7 +157,7 @@ geoengine build [OPTIONS]
 Run a worker with input parameters. Translates `KEY=VALUE` pairs into
 `--key value` CLI flags passed to the script inside Docker.
 
-```
+```bash
 geoengine run [OPTIONS] [WORKER] [-- <ARGS>...]
 ```
 
@@ -162,13 +166,20 @@ geoengine run [OPTIONS] [WORKER] [-- <ARGS>...]
 | `[WORKER]` | Worker name or path. Defaults to current directory. |
 | `-i, --input <KEY=VALUE>` | Input parameter. Repeatable. Maps to `--key value` inside the container. |
 | `--dev` | Run the dev image (built with `--dev`). |
+| `--ver <VERSION>` | Run a specific previously-built version (e.g. `1.0.0`). Loads the snapshotted config for that version. Cannot be combined with `--dev`. |
 | `--json` | Emit structured JSON result to stdout; logs go to stderr. |
 | `[-- <ARGS>...]` | Extra raw arguments passed through to the container command. |
 
 **Example:**
 ```bash
 geoengine run -i input-file=/data/raster.tif -i output-dir=/output --dev
+
+# Run a specific previously-built version
+geoengine run my-worker --ver 1.0.0 -i input-file=/data/raster.tif
 ```
+> If `--ver` is omitted, `geoengine run` uses the current saved/applied config
+> and its version string to choose the release image tag. It does not look up a
+> separate snapshotted version unless `--ver` is provided.
 
 > If a `file` parameter in `geoengine.yaml` declares `filetypes`, `geoengine run`
 > validates the file extension early and bails with a clear error if it does not
@@ -182,7 +193,7 @@ geoengine run -i input-file=/data/raster.tif -i output-dir=/output --dev
 
 List all registered workers.
 
-```
+```bash
 geoengine workers [OPTIONS]
 ```
 
@@ -191,20 +202,30 @@ geoengine workers [OPTIONS]
 | `--json` | Output as JSON for programmatic use. |
 | `--gis <GIS>` | Filter to workers registered in a specific GIS plugin: `qgis` or `arcgis`. |
 
+For `--json`, each worker entry includes:
+- `name`, `path`, `has_tool`, `found`, `description`
+- `has_dev_image` — whether `geoengine-local-dev/<worker>:latest` exists locally
+- `has_pushed_image` — whether any `geoengine-local/<worker>:<version>` image exists locally
+
 ---
 
 ### `geoengine describe`
 
-Describe a specific worker: shows name, version, inputs, plugins, and mounts.
+Describe a specific worker: shows name, description, version, inputs, and available versions.
 
-```
-geoengine describe [WORKER]
+```bash
+geoengine describe [WORKER] [--dev] [--ver <VERSION>]
 ```
 
 | Argument / Flag | Description |
 |---|---|
 | `[WORKER]` | Worker name or path. Defaults to current directory. |
-| `--json` | Output as JSON. |
+| `--dev` | Describe the currently applied development config. |
+| `--ver <VERSION>` | Describe a specific previously-built version. Cannot be combined with `--dev`. |
+
+> The human-readable output includes an **AVAILABLE VERSIONS** line listing all versions
+> recorded in `~/.geoengine/saves/{worker}/map.json` (no Docker client required). The JSON
+> output includes an `available_versions` array with the same list, sorted by semantic version.
 
 ---
 
@@ -213,7 +234,7 @@ geoengine describe [WORKER]
 Check for differences between the current worker files and what GeoEngine has
 on record (useful to see what has changed since the last `apply`).
 
-```
+```bash
 geoengine diff [OPTIONS]
 ```
 
@@ -227,7 +248,7 @@ geoengine diff [OPTIONS]
 
 Delete a worker from GeoEngine (unregisters it; does not delete source files).
 
-```
+```bash
 geoengine delete [OPTIONS]
 ```
 
@@ -241,7 +262,7 @@ geoengine delete [OPTIONS]
 
 Manage Docker images under GeoEngine.
 
-```
+```bash
 geoengine image <SUBCOMMAND>
 ```
 
@@ -249,7 +270,7 @@ geoengine image <SUBCOMMAND>
 |---|---|
 | `list` | List all GeoEngine Docker images. |
 | `import` | Import a Docker image from a `.tar` file (for air-gapped environments). |
-| `remove` | Remove a GeoEngine Docker image. |
+| `remove` | Remove a GeoEngine Docker image. For `geoengine-local/<worker>:<version>` images, also removes the version entry from `~/.geoengine/saves/{worker}/map.json` and deletes the config snapshot file if no other version still references it. |
 
 ---
 
@@ -257,7 +278,7 @@ geoengine image <SUBCOMMAND>
 
 Deploy images to GCP Artifact Registry.
 
-```
+```bash
 geoengine deploy <SUBCOMMAND>
 ```
 
@@ -276,25 +297,36 @@ Validate all GeoEngine-managed artifacts and repair anything that is stale. Run
 this after upgrading GeoEngine to bring all workers, GIS plugins, and agent
 skills up to date in one shot. (This is done automatically by `geoengine update`.)
 
-```
+```bash
 geoengine patch
 ```
 
 No flags. The command:
 
-1. **Global artifacts** — parses `~/.geoengine/settings.yaml`, every
-   `state/*.yaml`, and every `configs/*.json`; reports parse errors and
-   orphaned files (files with no matching registered worker).
-2. **Per-worker** — for every registered worker: checks the path exists,
+1. **Global artifacts** — parses `~/.geoengine/settings.yaml` and reports
+   settings parse failures before any dependent checks run.
+2. **Saved worker records** — validates every `state/*.yaml` and
+   `configs/*.json`, reports parse errors and orphaned files (files with no
+   matching registered worker), and patches `has_dev_image` /
+   `has_pushed_image` in each worker state from local Docker image presence.
+3. **Per-worker** — for every registered worker: checks the path exists,
    validates `geoengine.yaml` schema (read-only), checks `pixi.toml` is
    present (read-only), and silently regenerates `Dockerfile` and
    `.dockerignore` if their content differs from the current canonical
    template.
-3. **GIS plugins** — hashes each installed QGIS and ArcGIS plugin file
+4. **Saves migration** — for every registered worker: if
+   `~/.geoengine/saves/{worker}/map.json` is missing, initializes the
+   versioning saves directory and tags any previously-built release Docker
+   image versions to the current saved config snapshot (enabling
+   `geoengine run --ver <VERSION>` for those versions). If `map.json` already
+   exists, this migration step is skipped for that worker. Then validates the
+   canonical structure of the saves directory (checks map.json parses, all
+   referenced snapshots exist, no orphaned snapshot files).
+5. **GIS plugins** — hashes each installed QGIS and ArcGIS plugin file
    against the canonical version embedded in the binary. Reinstalls
    automatically if stale; skips entirely if the GIS application is not
    installed on the machine.
-4. **Agent skills** — syncs the GeoEngine skills from the local `skills/`
+6. **Agent skills** — syncs the GeoEngine skills from the local `skills/`
    directory into each installed agent's skills folder (`~/.claude/skills` for
    Claude, `~/.codex/skills` for Codex). Skills are compared by SHA-256 hash:
    changed or missing skills are updated, identical ones skipped. Agents not
@@ -313,6 +345,16 @@ upgrade and patch in one step). Not needed as part of the normal
 > agent is in use) so that the newly synced skills are loaded. Skills are
 > read at agent startup and changes will not take effect in a running session.
 
+> **Patch migration messages:** If `geoengine patch` outputs lines like
+> `✓ Updated image flags in state/<worker>.yaml`, `✓ Initialized saves directory`,
+> or `✓ Tagged N version(s) to current config snapshot`, these indicate state/saves
+> migration updates ran for one or more workers.
+> Surface these messages to the user for visibility. If the summary line shows
+> "N migrations applied" and includes a TO-DO about running `geoengine build`,
+> relay that recommendation — the existing snapshots are tagged from the current
+> applied config rather than the exact config at build time, so a fresh build will
+> create accurate per-version snapshots.
+
 ---
 
 ### `geoengine update`
@@ -322,7 +364,7 @@ Detects the original install method (Homebrew on macOS, curl install script on
 Linux/macOS/WSL2, PowerShell on Windows) and runs the appropriate updater,
 then automatically calls `geoengine patch`.
 
-```
+```bash
 geoengine update
 ```
 

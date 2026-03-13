@@ -2,7 +2,7 @@
 name=GeoEngine
 qgisMinimumVersion=3.0
 description=Integrates GeoEngine containerized geoprocessing tools into QGIS
-version=0.3.1
+version=0.3.2
 author=GeoEngine Team
 email=geoengine@example.com
 
@@ -32,6 +32,8 @@ experimental=True
 deprecated=False
 
 changelog=
+    0.3.2 - Fixed running of non-dev workers.
+        - Added support for multiple versions of workers.
     0.3.1 - Added custom widget for file selection, accepts non-geospatial files.
     0.3.0 - Input layers and output into layers integration
         - Added support for input files to select existing layers

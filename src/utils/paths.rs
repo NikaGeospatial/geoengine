@@ -27,3 +27,10 @@ pub fn get_state_dir() -> Result<PathBuf> {
     std::fs::create_dir_all(&state_dir)?;
     Ok(state_dir)
 }
+
+/// Get saves directory for per-worker config caching
+pub fn get_saves_dir() -> Result<PathBuf> {
+    let saves_dir = get_config_dir()?.join("saves");
+    std::fs::create_dir_all(&saves_dir)?;
+    Ok(saves_dir)
+}

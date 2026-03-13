@@ -1,6 +1,7 @@
-use crate::config::state;
+use crate::config::{state, yaml_store};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Worker configuration loaded from geoengine.yaml
@@ -26,6 +27,15 @@ pub struct WorkerConfig {
 
     /// Deployment configuration
     pub deploy: Option<DeployConfig>,
+}
+
+/// Relevant configuration fields for caching.
+/// Excludes `name` (directory key) and `version` (tracked in map.json).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelevantWorkerConfig {
+    pub description: Option<String>,
+    pub command: Option<CommandConfig>,
+    pub local_dir_mounts: Option<Vec<MountConfig>>,
 }
 
 /// Command configuration defining the entrypoint and input parameters
@@ -117,9 +127,30 @@ impl WorkerConfig {
         Ok(config)
     }
 
-    /// Compute a SHA-256 hash of only the build-relevant fields:
+    /// Extract version-relevant fields (excludes name and version).
+    pub fn get_relevant_fields(&self) -> RelevantWorkerConfig {
+        RelevantWorkerConfig {
+            description: self.description.clone(),
+            command: self.command.clone(),
+            local_dir_mounts: self.local_dir_mounts.clone(),
+        }
+    }
+
+    /// Compute a SHA-256 hash of config content fields only (excludes name and version).
+    /// Used as the dedup key for saves snapshots — if only the version changes,
+    /// the hash stays the same and we reuse the existing snapshot file.
+    pub fn config_content_hash(&self) -> String {
+        let content_fields = serde_json::json!({
+            "description": self.description,
+            "command": self.command.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default()),
+            "local_dir_mounts": self.local_dir_mounts.as_ref().map(|m| serde_json::to_value(m).unwrap_or_default())
+        });
+        state::sha256_string(&content_fields.to_string())
+    }
+
+    /// Compute a SHA-256 hash of the build-relevant fields:
     /// name, version, command, and local_dir_mounts.
-    /// This excludes description, plugins, and deploy which don't affect the Docker image.
+    /// Excludes description, plugins, and deploy which don't affect the Docker image.
     pub fn build_relevant_hash(&self) -> String {
         let build_fields = serde_json::json!({
             "name": self.name,
@@ -194,5 +225,126 @@ impl WorkerConfig {
             }),
             deploy: Some(DeployConfig { tenant_id: None }),
         }
+    }
+}
+
+impl RelevantWorkerConfig {
+    /// Load extracted version-relevant worker config from JSON save file.
+    pub fn load_json(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read relevant config file: {}", path.display()))?;
+
+        let config: RelevantWorkerConfig = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse relevant config file: {}", path.display()))?;
+
+        Ok(config)
+    }
+
+    /// Reconstruct a full WorkerConfig from the snapshot.
+    /// `name` and `version` must be supplied since they are not stored in the snapshot.
+    pub fn reconstruct_full_config(&self, name: &str, version: &str) -> WorkerConfig {
+        WorkerConfig {
+            name: name.to_string(),
+            version: version.to_string(),
+            description: self.description.clone(),
+            command: self.command.clone(),
+            local_dir_mounts: self.local_dir_mounts.clone(),
+            plugins: None,
+            deploy: None,
+        }
+    }
+}
+
+/// Mapping between version and configuration file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionConfigMaps {
+    pub worker: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mappings: Option<HashMap<String, String>>,
+}
+
+impl VersionConfigMaps {
+    pub fn load_from_worker(name: &str) -> Result<Self> {
+        let path = yaml_store::get_worker_saves_dir(name)
+            .with_context(|| "Failed to find worker's saves directory")?
+            .join("map.json");
+
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read map file: {}", path.display()))?;
+
+        let config: VersionConfigMaps = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+
+        Ok(config)
+    }
+
+    pub fn save_to_worker(&self, name: &str) -> Result<()> {
+        let path = yaml_store::get_worker_saves_dir(name)
+            .with_context(|| "Failed to find worker's saves directory")?
+            .join("map.json");
+
+        let content = serde_json::to_string_pretty(self)
+            .context("Failed to serialise worker mappings to JSON")?;
+
+        std::fs::write(path, content).context("Failed to write mappings file")?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config(description: Option<&str>) -> WorkerConfig {
+        WorkerConfig {
+            name: "example-worker".to_string(),
+            version: "1.2.3".to_string(),
+            description: description.map(str::to_string),
+            command: Some(CommandConfig {
+                program: "python".to_string(),
+                script: "main.py".to_string(),
+                inputs: Some(vec![InputParameter {
+                    name: "input".to_string(),
+                    param_type: "file".to_string(),
+                    required: Some(true),
+                    default: None,
+                    description: Some("Input raster".to_string()),
+                    enum_values: None,
+                    readonly: Some(true),
+                    filetypes: Some(vec![".tif".to_string()]),
+                }]),
+            }),
+            local_dir_mounts: Some(vec![MountConfig {
+                host_path: "./data".to_string(),
+                container_path: "/data".to_string(),
+                readonly: Some(true),
+            }]),
+            plugins: None,
+            deploy: None,
+        }
+    }
+
+    #[test]
+    fn build_relevant_hash_ignores_description_changes() {
+        let with_description = sample_config(Some("First description"));
+        let updated_description = sample_config(Some("Updated description"));
+
+        assert_eq!(
+            with_description.build_relevant_hash(),
+            updated_description.build_relevant_hash()
+        );
+    }
+
+    #[test]
+    fn config_content_hash_tracks_description_changes() {
+        let with_description = sample_config(Some("First description"));
+        let updated_description = sample_config(Some("Updated description"));
+
+        assert_ne!(
+            with_description.config_content_hash(),
+            updated_description.config_content_hash()
+        );
     }
 }
