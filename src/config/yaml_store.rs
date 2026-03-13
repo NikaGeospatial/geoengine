@@ -2,6 +2,7 @@ use crate::config::state;
 use crate::config::worker::{VersionConfigMaps, WorkerConfig};
 use crate::utils::paths;
 use anyhow::{Context, Result};
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 /// Get the directory for saved worker configs (~/.geoengine/configs)
@@ -96,6 +97,23 @@ pub fn rename_saves_dir(old_name: &str, new_name: &str) -> Result<()> {
     let new_path = get_worker_saves_dir(new_name)?;
 
     if old_path.exists() {
+        // Rewrite the worker name within the mapping file first
+        let mapping_path = old_path.join("map.json");
+
+        let content = std::fs::read_to_string(&mapping_path)
+            .with_context(|| format!("Failed to read map file: {}", mapping_path.display()))?;
+
+        let mut config: VersionConfigMaps = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", mapping_path.display()))?;
+
+        config.worker = new_name.to_string();
+
+        let content = serde_json::to_string_pretty(&config)
+            .context("Failed to serialize config file to JSON")?;
+
+        std::fs::write(mapping_path, &content).context("Failed to write mappings file")?;
+
+        // Then rename the directory itself
         std::fs::rename(&old_path, &new_path).with_context(|| {
             format!(
                 "Failed to rename saves directory from '{}' to '{}'",
@@ -148,6 +166,16 @@ pub fn cache_and_tag_config(worker_name: &str, version: &str) -> Result<()> {
     let current_config = load_saved_config(worker_name)?;
     let content_hash = current_config.config_content_hash();
 
+    // Load or create map.json first; if this fails we should not create a new snapshot file.
+    let mut saves_map = match VersionConfigMaps::load_from_worker(worker_name) {
+        Ok(map) => map,
+        Err(err) if is_not_found_error(&err) => VersionConfigMaps {
+            worker: worker_name.to_string(),
+            mappings: None,
+        },
+        Err(err) => return Err(err),
+    };
+
     // Only write the snapshot file if no file with this hash exists (dedup)
     let snapshot_file = saves_path.join(format!("{}.json", content_hash));
     let snapshot_was_new = !snapshot_file.exists();
@@ -159,14 +187,7 @@ pub fn cache_and_tag_config(worker_name: &str, version: &str) -> Result<()> {
             .context("Failed to write config snapshot to cache")?;
     }
 
-    // Load or create map.json, then add the version mapping
-    let mut saves_map = match VersionConfigMaps::load_from_worker(worker_name) {
-        Ok(map) => map,
-        Err(_) => VersionConfigMaps {
-            worker: worker_name.to_string(),
-            mappings: None,
-        },
-    };
+    // Add/overwrite the version -> hash mapping and persist.
     let mut mappings = saves_map.mappings.unwrap_or_default();
     mappings.insert(version.to_string(), content_hash);
     saves_map.mappings = Some(mappings);
@@ -186,4 +207,13 @@ pub fn cache_and_tag_config(worker_name: &str, version: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_not_found_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .map(|io_err| io_err.kind() == ErrorKind::NotFound)
+            .unwrap_or(false)
+    })
 }

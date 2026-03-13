@@ -86,7 +86,7 @@ enum Commands {
         json: bool,
 
         /// Runs the latest dev version of the worker
-        #[arg(long)]
+        #[arg(long, conflicts_with = "ver")]
         dev: bool,
 
         /// Run a specific previously-built version of the worker
@@ -119,7 +119,7 @@ enum Commands {
         json: bool,
 
         /// Describe the currently applied development config
-        #[arg(long)]
+        #[arg(long, conflicts_with = "ver")]
         dev: bool,
 
         /// Describe a specific previously-built version

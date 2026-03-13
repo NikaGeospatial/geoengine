@@ -86,9 +86,15 @@ def load_worker_versions() -> Dict[str, List[str]]:
             data = json.load(f)
         if isinstance(data, dict):
             return {k: v for k, v in data.items() if isinstance(v, list)}
-    except Exception:
-        pass
-    return {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, IOError, json.JSONDecodeError) as e:
+        QgsMessageLog.logMessage(
+            f"Failed to load worker versions from {WORKER_VERSIONS_FILE}: {e}",
+            "GeoEngine",
+            level=1,
+        )
+        return {}
 
 
 def save_worker_versions(data: Dict[str, List[str]]) -> None:
@@ -96,7 +102,7 @@ def save_worker_versions(data: Dict[str, List[str]]) -> None:
     try:
         with open(WORKER_VERSIONS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-    except (OSError, IOError, json.JSONEncodeError) as e:
+    except (OSError, IOError, TypeError, FileNotFoundError) as e:
         QgsMessageLog.logMessage(
             f"Failed to save worker versions to {WORKER_VERSIONS_FILE}: {e}",
             "GeoEngine",
@@ -442,7 +448,11 @@ class GeoEngineProvider(QgsProcessingProvider):
                 save_worker_versions(saved_versions)
 
         except Exception as e:
-            print(f"GeoEngine tool discovery failed: {e}")
+            QgsMessageLog.logMessage(
+                f"GeoEngine tool discovery failed: {e}",
+                "GeoEngine",
+                level=1,
+            )
 
         return algorithms
 
@@ -866,7 +876,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         input_name: str,
         context: QgsProcessingContext,
         feedback: QgsProcessingFeedback,
-    ) -> (str, str):
+    ) -> Tuple[str, str]:
         """Export a raster layer to a temporary GeoTIFF and return (path, temp_dir)."""
         temp_dir = tempfile.mkdtemp(prefix="geoengine-qgis-input-", dir=_PLUGIN_TMP_DIR)
         out_path = os.path.join(temp_dir, f"{self._safe_temp_stem(input_name)}.tif")

@@ -67,11 +67,18 @@ class GeoEnginePlugin:
 
     def _on_trigger_changed(self, path):
         """Called when the trigger file is modified by geoengine apply."""
-        self._do_silent_refresh()
-        # Re-watch: some OS's drop the watch after a write
-        if path not in self._watcher.files():
-            if os.path.exists(path):
-                self._watcher.addPath(path)
+        try:
+            self._do_silent_refresh()
+            # Re-watch: some OS's drop the watch after a write
+            if path not in self._watcher.files():
+                if os.path.exists(path):
+                    self._watcher.addPath(path)
+        except Exception as e:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "GeoEngine Error",
+                f"Error refreshing processing providers:\n{e}"
+            )
 
     def _refresh_processing_toolbox_providers(self):
         """Refresh QGIS built-in Processing providers used by the toolbox."""
@@ -214,7 +221,14 @@ class GeoEnginePlugin:
         self._version_action.setVisible(not bool(enabled))
         mode = "enabled" if enabled else "disabled"
         self.iface.messageBar().pushInfo("GeoEngine", f"Dev mode {mode}")
-        self._do_silent_refresh()
+        try:
+            self._do_silent_refresh()
+        except Exception as e:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "GeoEngine Error",
+                f"Error refreshing processing providers:\n{e}"
+            )
 
     def show_version_dialog(self):
         """Open the Set Worker Versions dialog (only available when dev mode is off)."""
