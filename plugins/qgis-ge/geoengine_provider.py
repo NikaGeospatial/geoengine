@@ -388,9 +388,10 @@ class GeoEngineProvider(QgsProcessingProvider):
                         versioned_tool = client.get_worker_tool(worker['name']) or tool
                         algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=None))
                     else:
+                        latest_ver = available_versions[-1]
                         for ver in available_versions:
                             versioned_tool = client.get_worker_tool(worker['name'], ver=ver) or tool
-                            algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=ver))
+                            algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=ver, is_latest=(ver == latest_ver)))
 
         except Exception as e:
             QgsMessageLog.logMessage(
@@ -424,13 +425,14 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
     """Dynamic QGIS Processing algorithm for a GeoEngine worker."""
     OPEN_OUTPUT_FOLDER_PARAM = "__geoengine_open_output_folder"
 
-    def __init__(self, worker_name: str, tool_info: Dict, ver: Optional[str] = None, dev_mode: Optional[bool] = None):
+    def __init__(self, worker_name: str, tool_info: Dict, ver: Optional[str] = None, dev_mode: Optional[bool] = None, is_latest: bool = False):
         """Initialize an algorithm wrapper for a worker definition."""
         super().__init__()
         self._worker = worker_name
         self._tool = tool_info
         self._inputs = tool_info.get('inputs', [])
         self._ver = ver  # None means "latest" (no --ver flag)
+        self._is_latest = is_latest
         # Freeze dev mode and group membership at construction time so createInstance()
         # clones always return the same values — QGIS requires these to be stable.
         self._dev_mode = is_dev_mode_enabled() if dev_mode is None else dev_mode
@@ -439,7 +441,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
 
     def createInstance(self):
         """Create a new algorithm instance for QGIS cloning."""
-        return GeoEngineAlgorithm(self._worker, self._tool, self._ver, dev_mode=self._dev_mode)
+        return GeoEngineAlgorithm(self._worker, self._tool, self._ver, dev_mode=self._dev_mode, is_latest=self._is_latest)
 
     def name(self) -> str:
         """Return the algorithm id used by QGIS processing (must be unique per algorithm)."""
@@ -452,7 +454,8 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         """Return the human-readable algorithm name."""
         base = self._tool.get('name', self._worker)
         if self._ver:
-            return f"{base} ({self._ver})"
+            label = f"{base} (*{self._ver})" if self._is_latest else f"{base} ({self._ver})"
+            return label
         return base
 
     def group(self) -> str:
