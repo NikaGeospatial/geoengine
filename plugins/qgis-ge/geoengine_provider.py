@@ -382,9 +382,15 @@ class GeoEngineProvider(QgsProcessingProvider):
 
                     available_versions = tool.get('available_versions') or []
 
-                    for ver in available_versions:
-                        versioned_tool = client.get_worker_tool(worker['name'], ver=ver) or tool
-                        algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=ver))
+                    if not available_versions:
+                        # Fallback: worker has a pushed image but no version metadata yet;
+                        # surface it as a single unversioned entry so it appears in the toolbox.
+                        versioned_tool = client.get_worker_tool(worker['name']) or tool
+                        algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=None))
+                    else:
+                        for ver in available_versions:
+                            versioned_tool = client.get_worker_tool(worker['name'], ver=ver) or tool
+                            algorithms.append(GeoEngineAlgorithm(worker['name'], versioned_tool, ver=ver))
 
         except Exception as e:
             QgsMessageLog.logMessage(
@@ -414,21 +420,22 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
     """Dynamic QGIS Processing algorithm for a GeoEngine worker."""
     OPEN_OUTPUT_FOLDER_PARAM = "__geoengine_open_output_folder"
 
-    def __init__(self, worker_name: str, tool_info: Dict, ver: Optional[str] = None):
+    def __init__(self, worker_name: str, tool_info: Dict, ver: Optional[str] = None, dev_mode: Optional[bool] = None):
         """Initialize an algorithm wrapper for a worker definition."""
         super().__init__()
         self._worker = worker_name
         self._tool = tool_info
         self._inputs = tool_info.get('inputs', [])
         self._ver = ver  # None means "latest" (no --ver flag)
-        # Freeze group membership at construction time so createInstance() clones
-        # always return the same values — QGIS requires these to be stable.
-        self._group = '' if is_dev_mode_enabled() else tool_info.get('name', worker_name)
-        self._group_id = '' if is_dev_mode_enabled() else worker_name
+        # Freeze dev mode and group membership at construction time so createInstance()
+        # clones always return the same values — QGIS requires these to be stable.
+        self._dev_mode = is_dev_mode_enabled() if dev_mode is None else dev_mode
+        self._group = '' if self._dev_mode else tool_info.get('name', worker_name)
+        self._group_id = '' if self._dev_mode else worker_name
 
     def createInstance(self):
         """Create a new algorithm instance for QGIS cloning."""
-        return GeoEngineAlgorithm(self._worker, self._tool, self._ver)
+        return GeoEngineAlgorithm(self._worker, self._tool, self._ver, dev_mode=self._dev_mode)
 
     def name(self) -> str:
         """Return the algorithm id used by QGIS processing (must be unique per algorithm)."""
@@ -466,7 +473,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
         if description:
             parts.append(description)
 
-        if is_dev_mode_enabled():
+        if self._dev_mode:
             applied_at = self._tool.get('applied_at')
             built_at = self._tool.get('built_at')
             yaml_hash = self._tool.get('yaml_hash')
@@ -1218,6 +1225,7 @@ class GeoEngineAlgorithm(QgsProcessingAlgorithm):
                 on_output=lambda line: feedback.pushInfo(line),
                 is_cancelled=lambda: feedback.isCanceled(),
                 ver=self._ver,
+                dev_mode=self._dev_mode,
             )
 
             feedback.pushInfo("Worker completed successfully!")

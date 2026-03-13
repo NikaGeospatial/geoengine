@@ -191,6 +191,27 @@ async fn remove_image(client: &DockerClient, image: &str, force: bool) -> Result
                 );
             }
         }
+    } else {
+        // Image was specified by ID or alias — inspect repo tags to find any
+        // geoengine-local/<worker>:<version> entries and clean those up too.
+        if let Ok(images) = client.list_images(Some(image), false).await {
+            for img in &images {
+                for tag in &img.repo_tags {
+                    if let Some(rest) = tag.strip_prefix("geoengine-local/") {
+                        if let Some((worker_name, version)) = rest.split_once(':') {
+                            if let Err(err) = remove_version_from_saves(worker_name, version) {
+                                eprintln!(
+                                    "  {} Image was removed, but failed to clean saved version metadata for '{}': {}",
+                                    "!".yellow().bold(),
+                                    worker_name,
+                                    err
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -203,6 +224,16 @@ fn remove_version_from_saves(worker_name: &str, version: &str) -> Result<()> {
             worker_name
         )
     })?;
+
+    // Acquire exclusive lock for the full load → modify → save cycle, using the
+    // same lock key as cache_and_tag_config to prevent concurrent interleaving.
+    let _lock = match yaml_store::lock_worker_saves_map(worker_name) {
+        Ok(l) => l,
+        Err(_) => {
+            // If the saves directory doesn't exist yet there is nothing to remove.
+            return Ok(());
+        }
+    };
 
     let mut map = match VersionConfigMaps::load_from_worker(worker_name) {
         Ok(m) => m,

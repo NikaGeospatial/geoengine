@@ -212,7 +212,7 @@ For `--json`, each worker entry includes:
 
 ### `geoengine describe`
 
-Describe a specific worker: shows name, version, inputs, plugins, mounts, and available saved versions.
+Describe a specific worker: shows name, description, version, inputs, and available versions.
 
 ```
 geoengine describe [WORKER] [--dev] [--ver <VERSION>]
@@ -221,7 +221,6 @@ geoengine describe [WORKER] [--dev] [--ver <VERSION>]
 | Argument / Flag | Description |
 |---|---|
 | `[WORKER]` | Worker name or path. Defaults to current directory. |
-| `--json` | Output as JSON. |
 | `--dev` | Describe the currently applied development config. |
 | `--ver <VERSION>` | Describe a specific previously-built version. Cannot be combined with `--dev`. |
 

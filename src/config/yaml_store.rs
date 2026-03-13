@@ -2,6 +2,8 @@ use crate::config::state;
 use crate::config::worker::{VersionConfigMaps, WorkerConfig};
 use crate::utils::paths;
 use anyhow::{Context, Result};
+use fs2::FileExt;
+use std::fs::File;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
@@ -100,18 +102,20 @@ pub fn rename_saves_dir(old_name: &str, new_name: &str) -> Result<()> {
         // Rewrite the worker name within the mapping file first
         let mapping_path = old_path.join("map.json");
 
-        let content = match std::fs::read_to_string(&mapping_path) {
-            Ok(content) => content,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        let mut config: VersionConfigMaps = match std::fs::read_to_string(&mapping_path) {
+            Ok(content) => serde_json::from_str(&content).with_context(|| {
+                format!("Failed to parse config file: {}", mapping_path.display())
+            })?,
+            Err(err) if err.kind() == ErrorKind::NotFound => VersionConfigMaps {
+                worker: new_name.to_string(),
+                mappings: None,
+            },
             Err(err) => {
                 return Err(err).with_context(|| {
                     format!("Failed to read map file: {}", mapping_path.display())
                 });
             }
         };
-
-        let mut config: VersionConfigMaps = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse config file: {}", mapping_path.display()))?;
 
         config.worker = new_name.to_string();
 
@@ -156,9 +160,36 @@ pub fn check_changed_config(worker_name: &str, worker_path: &PathBuf) -> Result<
     }
 }
 
-/// Get a worker's saves cache directory
+/// Get a worker's saves cache directory.
+/// Returns an error if `worker_name` is not a single, normal path component
+/// (e.g. rejects "..", absolute paths, or names containing separators).
 pub fn get_worker_saves_dir(worker_name: &str) -> Result<PathBuf> {
+    use std::path::{Component, Path};
+    let p = Path::new(worker_name);
+    let mut components = p.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => {}
+        _ => anyhow::bail!("Invalid worker name: {:?}", worker_name),
+    }
     Ok(paths::get_saves_dir()?.join(worker_name))
+}
+
+/// Acquire an exclusive file lock on the map.json companion lock file for a worker.
+/// The lock is held until the returned `File` is dropped.
+pub fn lock_worker_saves_map(worker_name: &str) -> Result<File> {
+    let saves_path = get_worker_saves_dir(worker_name)?;
+    std::fs::create_dir_all(&saves_path)
+        .with_context(|| format!("Failed to create saves directory: {}", saves_path.display()))?;
+    let lock_path = saves_path.join("map.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open lock file: {}", lock_path.display()))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("Failed to acquire exclusive lock: {}", lock_path.display()))?;
+    Ok(lock_file)
 }
 
 /// Cache the current config and tag it to a version.
@@ -169,6 +200,10 @@ pub fn cache_and_tag_config(worker_name: &str, version: &str) -> Result<()> {
     // Ensure saves directory exists
     std::fs::create_dir_all(&saves_path)
         .with_context(|| format!("Failed to create saves directory: {}", saves_path.display()))?;
+
+    // Acquire exclusive lock for the full load → modify → save cycle so concurrent
+    // build/remove calls cannot interleave on map.json.
+    let _lock = lock_worker_saves_map(worker_name)?;
 
     let current_config = load_saved_config(worker_name)?;
     let content_hash = current_config.config_content_hash();
@@ -214,6 +249,7 @@ pub fn cache_and_tag_config(worker_name: &str, version: &str) -> Result<()> {
     }
 
     Ok(())
+    // _lock is dropped here, releasing the exclusive lock.
 }
 
 pub(crate) fn is_not_found_error(err: &anyhow::Error) -> bool {

@@ -19,6 +19,7 @@ fn print_summary(
     plugins_updated: usize,
     skills_updated: usize,
     migrations_applied: usize,
+    snapshot_tag_migrations: usize,
     issues: &[String],
 ) {
     let issue_count = issues.len();
@@ -42,6 +43,7 @@ fn print_summary(
         || plugins_updated > 0
         || skills_updated > 0
         || migrations_applied > 0
+        || snapshot_tag_migrations > 0
         || issue_count > 0
     {
         println!();
@@ -72,7 +74,7 @@ fn print_summary(
                 if skills_updated == 1 { "" } else { "s" },
             )
         }
-        if migrations_applied > 0 {
+        if snapshot_tag_migrations > 0 {
             println!(
                 "  {} Versions tagged from current config snapshots — run 'geoengine build' to create fresh snapshots for the current configs.",
                 "!".yellow().bold(),
@@ -148,6 +150,7 @@ struct PatchV2Ctx {
     plugins_updated: usize,
     skills_updated: usize,
     migrations_applied: usize,
+    snapshot_tag_migrations: usize,
     workers_checked: usize,
     settings: Option<Settings>,
     canonical_dockerfile: String,
@@ -163,6 +166,7 @@ impl PatchV2Ctx {
             plugins_updated: 0,
             skills_updated: 0,
             migrations_applied: 0,
+            snapshot_tag_migrations: 0,
             workers_checked: 0,
             settings: None,
             canonical_dockerfile: dockerfile::canonical_dockerfile_content(),
@@ -401,6 +405,7 @@ pub async fn patch_all_v2() -> Result<()> {
         ctx.plugins_updated,
         ctx.skills_updated,
         ctx.migrations_applied,
+        ctx.snapshot_tag_migrations,
         &ctx.issues,
     );
 
@@ -436,6 +441,7 @@ fn v2_load_settings(ctx: &'_ mut PatchV2Ctx) -> BoxFuture<'_, Result<V2PatchFlow
                 print_summary(
                     ctx.workers_checked,
                     ctx.dockerfiles_updated,
+                    0,
                     0,
                     0,
                     0,
@@ -799,13 +805,8 @@ fn v2_generate_worker_saves<'a>(
             return Ok(V2WorkerFlow::Continue);
         }
 
-        // Initialize saves dir + map.json, then tag existing release images once.
+        // Initialize saves dir only; map.json is written after successful backfill.
         std::fs::create_dir_all(&saves_dir)?;
-        VersionConfigMaps {
-            worker: name.to_string(),
-            mappings: None,
-        }
-        .save_to_worker(name)?;
         println!("    {} Initialized saves directory", "✓".green().bold());
 
         // Connect to Docker to discover release images
@@ -818,6 +819,12 @@ fn v2_generate_worker_saves<'a>(
                     name,
                     e
                 );
+                // Write empty map.json so the migration is marked done.
+                VersionConfigMaps {
+                    worker: name.to_string(),
+                    mappings: None,
+                }
+                .save_to_worker(name)?;
                 return Ok(V2WorkerFlow::Continue);
             }
         };
@@ -836,6 +843,12 @@ fn v2_generate_worker_saves<'a>(
                     name,
                     e
                 );
+                // Write empty map.json so the migration is marked done.
+                VersionConfigMaps {
+                    worker: name.to_string(),
+                    mappings: None,
+                }
+                .save_to_worker(name)?;
                 return Ok(V2WorkerFlow::Continue);
             }
         };
@@ -859,6 +872,12 @@ fn v2_generate_worker_saves<'a>(
                 "    {} No release images found; skipping version tagging.",
                 "•".cyan()
             );
+            // Write empty map.json so the migration is marked done.
+            VersionConfigMaps {
+                worker: name.to_string(),
+                mappings: None,
+            }
+            .save_to_worker(name)?;
             return Ok(V2WorkerFlow::Continue);
         }
 
@@ -881,7 +900,7 @@ fn v2_generate_worker_saves<'a>(
             "Versions were tagged to the current saved config snapshot. \
              If config is mismatched to version, please delete that version's image.",
         );
-        ctx.migrations_applied += 1;
+        ctx.snapshot_tag_migrations += 1;
 
         Ok(V2WorkerFlow::Continue)
     })
