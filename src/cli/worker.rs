@@ -1977,7 +1977,7 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
         "DEV".bold(),
         "PUSHED".bold(),
         "PATH".bold(),
-        name_w = name_w,
+        name_w = name_w - 2,
         found_w = found_w,
         dev_w = dev_w,
         pushed_w = pushed_w,
@@ -1989,11 +1989,6 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
     );
 
     for (name, path) in workers {
-        let applied = if yaml_store::load_saved_config(name).is_ok() {
-            format!("{:<found_w$}", "✓", found_w = found_w).green()
-        } else {
-            format!("{:<found_w$}", "✗", found_w = found_w).red()
-        };
         let found = if path.join("geoengine.yaml").exists() {
             format!("{:<found_w$}", "✓", found_w = found_w).green()
         } else {
@@ -2019,8 +2014,7 @@ pub async fn list_workers(json: bool, gis: Option<String>) -> Result<()> {
             format!("{:<pushed_w$}", "no", pushed_w = pushed_w).red()
         };
         println!(
-            "{} {:<name_w$} {} {} {}   {}",
-            applied,
+            "{:<name_w$} {} {} {}   {}",
             name,
             found,
             has_dev,
