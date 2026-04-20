@@ -1,0 +1,19 @@
+name: Notify docs on release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger nika-docs sync
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}
+        run: |
+          gh api \
+            --method POST \
+            /repos/lawrencenika/nika-docs/dispatches \
+            -f event_type=release-published \
+            -f 'client_payload[repo]=${{ github.repository }}'
